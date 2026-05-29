@@ -1,0 +1,476 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Sarvam AI Voice Agent</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 20px;
+        }
+        .container {
+            background: white;
+            border-radius: 20px;
+            padding: 40px;
+            box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+            max-width: 600px;
+            width: 100%;
+        }
+        h1 {
+            color: #667eea;
+            margin-bottom: 10px;
+            font-size: 32px;
+        }
+        .subtitle {
+            color: #666;
+            margin-bottom: 30px;
+            font-size: 14px;
+        }
+        .status {
+            padding: 15px;
+            border-radius: 10px;
+            margin-bottom: 20px;
+            font-size: 14px;
+            font-weight: 500;
+        }
+        .status.connected { background: #d4edda; color: #155724; }
+        .status.disconnected { background: #f8d7da; color: #721c24; }
+        .status.listening { background: #d1ecf1; color: #0c5460; }
+        .status.speaking { background: #fff3cd; color: #856404; }
+        
+        button {
+            width: 100%;
+            padding: 15px;
+            border: none;
+            border-radius: 10px;
+            font-size: 16px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.2s;
+            margin-bottom: 15px;
+        }
+        button:hover { transform: translateY(-2px); box-shadow: 0 4px 12px rgba(0,0,0,0.15); }
+        button:active { transform: translateY(0); }
+        button:disabled { opacity: 0.5; cursor: not-allowed; }
+        
+        .btn-primary { background: #667eea; color: white; }
+        .btn-danger { background: #dc3545; color: white; }
+        .btn-secondary { background: #6c757d; color: white; }
+        
+        .metrics {
+            background: #f8f9fa;
+            border-radius: 10px;
+            padding: 20px;
+            margin-top: 20px;
+        }
+        .metrics h3 {
+            color: #333;
+            margin-bottom: 15px;
+            font-size: 18px;
+        }
+        .metric-row {
+            display: flex;
+            justify-content: space-between;
+            padding: 10px 0;
+            border-bottom: 1px solid #dee2e6;
+        }
+        .metric-row:last-child { border-bottom: none; }
+        .metric-label { color: #666; font-size: 14px; }
+        .metric-value {
+            font-weight: 600;
+            color: #333;
+            font-size: 14px;
+        }
+        .metric-value.good { color: #28a745; }
+        .metric-value.warning { color: #ffc107; }
+        .metric-value.bad { color: #dc3545; }
+        
+        .transcript {
+            background: #f8f9fa;
+            border-radius: 10px;
+            padding: 15px;
+            margin-top: 20px;
+            max-height: 200px;
+            overflow-y: auto;
+            font-size: 14px;
+            line-height: 1.6;
+        }
+        .transcript-item {
+            margin-bottom: 10px;
+            padding-bottom: 10px;
+            border-bottom: 1px solid #dee2e6;
+        }
+        .transcript-item:last-child { border-bottom: none; margin-bottom: 0; }
+        .transcript-label {
+            font-weight: 600;
+            color: #667eea;
+            margin-right: 8px;
+        }
+        
+        .config {
+            background: #f8f9fa;
+            border-radius: 10px;
+            padding: 15px;
+            margin-bottom: 20px;
+            font-size: 13px;
+        }
+        .config-row {
+            display: flex;
+            justify-content: space-between;
+            padding: 5px 0;
+            color: #666;
+        }
+        .config-value { color: #333; font-weight: 500; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🎙️ Sarvam AI Voice</h1>
+        <p class="subtitle">100% Sarvam AI &mdash; STT + TTS + LLM</p>
+        
+        <div id="status" class="status disconnected">
+            Disconnected
+        </div>
+        
+        <div class="config">
+            <div class="config-row">
+                <label for="clinicIdInput">Clinic ID:</label>
+                <input type="text" id="clinicIdInput" value="clinic_001" style="padding: 5px; border: 1px solid #ddd; border-radius: 4px; width: 200px;">
+            </div>
+            <div class="config-row">
+                <label for="phoneInput">Phone:</label>
+                <input type="text" id="phoneInput" value="+919999999999" style="padding: 5px; border: 1px solid #ddd; border-radius: 4px; width: 200px;">
+            </div>
+            <div class="config-row">
+                <span>Connected:</span>
+                <span class="config-value" id="sessionInfo">Not connected</span>
+            </div>
+            <div class="config-row">
+                <span>Audio:</span>
+                <span class="config-value">16kHz PCM, 2048 buffer</span>
+            </div>
+        </div>
+        
+        <button id="connectBtn" class="btn-primary">Connect</button>
+        <button id="disconnectBtn" class="btn-danger" style="display:none;">Disconnect</button>
+        
+        <div class="metrics">
+            <h3>📊 Latency Metrics</h3>
+            <div class="metric-row">
+                <span class="metric-label">Last Turn Total:</span>
+                <span class="metric-value" id="lastTurnMs">-</span>
+            </div>
+            <div class="metric-row">
+                <span class="metric-label">Processing:</span>
+                <span class="metric-value" id="processingMs">-</span>
+            </div>
+            <div class="metric-row">
+                <span class="metric-label">First Audio:</span>
+                <span class="metric-value" id="firstAudioMs">-</span>
+            </div>
+            <div class="metric-row">
+                <span class="metric-label">Avg Turn (p50):</span>
+                <span class="metric-value" id="avgTurnMs">-</span>
+            </div>
+        </div>
+        
+        <div class="transcript" id="transcript">
+            <div style="color: #999; text-align: center;">Conversation will appear here...</div>
+        </div>
+    </div>
+
+    <script>
+        const WS_PROTOCOL = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+        const WS_URL = `${WS_PROTOCOL}//${window.location.host}/ws`;
+        const SAMPLE_RATE = 16000;
+        
+        let ws = null;
+        let audioContext = null;
+        let microphone = null;
+        let processor = null;
+        let isListening = false;
+        let currentState = 'disconnected';
+        let sessionId = null;
+        
+        const statusEl = document.getElementById('status');
+        const connectBtn = document.getElementById('connectBtn');
+        const disconnectBtn = document.getElementById('disconnectBtn');
+        const transcriptEl = document.getElementById('transcript');
+        const clinicIdInput = document.getElementById('clinicIdInput');
+        const phoneInput = document.getElementById('phoneInput');
+        const sessionInfo = document.getElementById('sessionInfo');
+        
+        function setStatus(state, message) {
+            currentState = state;
+            statusEl.className = `status ${state}`;
+            statusEl.textContent = message;
+        }
+        
+        function addTranscript(label, text) {
+            const item = document.createElement('div');
+            item.className = 'transcript-item';
+            item.innerHTML = `<span class="transcript-label">${label}:</span>${text}`;
+            if (transcriptEl.querySelector('div[style]')) {
+                transcriptEl.innerHTML = '';
+            }
+            transcriptEl.appendChild(item);
+            transcriptEl.scrollTop = transcriptEl.scrollHeight;
+        }
+        
+        function updateMetrics(data) {
+            function colorize(value, target) {
+                if (!value) return '';
+                if (value < target) return 'good';
+                if (value < target * 1.5) return 'warning';
+                return 'bad';
+            }
+            // llm_total_ms → Last Turn Total
+            const totalMs = data.llm_total_ms || data.last_turn_ms;
+            if (totalMs) {
+                const el = document.getElementById('lastTurnMs');
+                el.textContent = `${totalMs}ms`;
+                el.className = `metric-value ${colorize(totalMs, 1200)}`;
+            }
+            // llm_ttft_ms → Processing (time-to-first-token)
+            const ttftMs = data.llm_ttft_ms || data.processing_ms;
+            if (ttftMs) {
+                const el = document.getElementById('processingMs');
+                el.textContent = `${ttftMs}ms`;
+                el.className = `metric-value ${colorize(ttftMs, 500)}`;
+            }
+            if (data.first_audio_ms) {
+                const el = document.getElementById('firstAudioMs');
+                el.textContent = `${data.first_audio_ms}ms`;
+                el.className = `metric-value ${colorize(data.first_audio_ms, 400)}`;
+            }
+            if (data.avg_turn_ms) {
+                const el = document.getElementById('avgTurnMs');
+                el.textContent = `${data.avg_turn_ms}ms`;
+                el.className = `metric-value ${colorize(data.avg_turn_ms, 1200)}`;
+            }
+        }
+        
+        async function connect() {
+            try {
+                setStatus('connecting', 'Connecting...');
+                if (!audioContext) {
+                    audioContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: SAMPLE_RATE });
+                    if (audioContext.state === 'suspended') await audioContext.resume();
+                }
+                ws = new WebSocket(WS_URL);
+                ws.binaryType = 'arraybuffer';
+                
+                ws.onopen = async () => {
+                    ws.send(JSON.stringify({
+                        type: 'start_session',
+                        clinic_id: clinicIdInput.value.trim() || 'clinic_001',
+                        phone: phoneInput.value.trim() || '+919999999999'
+                    }));
+                };
+                ws.onmessage = (event) => {
+                    if (typeof event.data === 'string') {
+                        handleControlMessage(JSON.parse(event.data));
+                    } else {
+                        console.log('🔊 Audio chunk received:', event.data.byteLength, 'bytes');
+                        handleAudioChunk(event.data);
+                    }
+                };
+                ws.onerror = () => setStatus('error', 'Connection error');
+                ws.onclose = () => {
+                    setStatus('disconnected', 'Disconnected');
+                    connectBtn.style.display = 'block';
+                    disconnectBtn.style.display = 'none';
+                    clinicIdInput.disabled = false;
+                    phoneInput.disabled = false;
+                    sessionInfo.textContent = 'Not connected';
+                    stopMicrophone();
+                };
+            } catch (error) {
+                setStatus('error', `Error: ${error.message}`);
+            }
+        }
+        
+        function handleControlMessage(data) {
+            switch (data.type) {
+                case 'connected':
+                    sessionId = data.session_id;
+                    break;
+                case 'session_ready':
+                    setStatus('connected', 'Connected & Ready');
+                    sessionInfo.textContent = `${data.clinic_id} / ${data.phone}`;
+                    connectBtn.style.display = 'none';
+                    disconnectBtn.style.display = 'block';
+                    clinicIdInput.disabled = true;
+                    phoneInput.disabled = true;
+                    startMicrophone();
+                    break;
+                case 'transcript':
+                    addTranscript('You', data.text);
+                    break;
+                case 'response':
+                    addTranscript('Agent', data.text);
+                    break;
+                case 'metrics':
+                    updateMetrics(data);
+                    break;
+                case 'stop_audio':
+                    // Barge-in: stop all playing/scheduled audio instantly
+                    flushAudio();
+                    setStatus('listening', 'Listening...');
+                    break;
+            }
+        }
+        
+        let audioQueue = [];
+        let isPlayingAudio = false;
+        let nextScheduledTime = 0;
+        let activeSources = [];  // track ALL scheduled/playing AudioBufferSourceNodes
+        let playbackGeneration = 0;  // incremented on flush to invalidate stale callbacks
+        
+        function flushAudio() {
+            // Increment generation — any pending setTimeout callbacks become stale
+            playbackGeneration++;
+            // Stop AND disconnect all scheduled/playing audio sources immediately
+            activeSources.forEach(src => {
+                try { src.stop(); } catch(e) {}
+                try { src.disconnect(); } catch(e) {}
+            });
+            activeSources = [];
+            audioQueue = [];
+            isPlayingAudio = false;
+            nextScheduledTime = 0;
+        }
+        
+        async function handleAudioChunk(arrayBuffer) {
+            audioQueue.push(arrayBuffer);
+            if (!isPlayingAudio) {
+                isPlayingAudio = true;
+                if (!audioContext) {
+                    audioContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: SAMPLE_RATE });
+                }
+                if (audioContext.state === 'suspended') await audioContext.resume();
+                // Don't reset if sentence 1's audio is still scheduled ahead in the
+                // WebAudio clock. Resetting to currentTime causes sentence 2 to start
+                // playing while sentence 1 is still in progress → overlap.
+                if (nextScheduledTime < audioContext.currentTime) {
+                    nextScheduledTime = audioContext.currentTime;
+                }
+                playNextAudioChunk(playbackGeneration);
+            }
+        }
+        
+        async function playNextAudioChunk(gen) {
+            // If generation changed (flushAudio was called), stop this chain
+            if (gen !== playbackGeneration) return;
+            
+            if (audioQueue.length === 0) {
+                isPlayingAudio = false;
+                // DON'T clear activeSources here — sources may still be playing!
+                // They self-remove via onended; flushAudio() force-clears them.
+                setStatus('listening', 'Listening...');
+                return;
+            }
+            setStatus('speaking', 'Agent speaking...');
+            try {
+                const arrayBuffer = audioQueue.shift();
+                const pcm16 = new Int16Array(arrayBuffer);
+                const audioBuffer = audioContext.createBuffer(1, pcm16.length, SAMPLE_RATE);
+                const channelData = audioBuffer.getChannelData(0);
+                for (let i = 0; i < pcm16.length; i++) {
+                    channelData[i] = pcm16[i] / 32768.0;
+                }
+                const duration = pcm16.length / SAMPLE_RATE;
+                const source = audioContext.createBufferSource();
+                source.buffer = audioBuffer;
+                source.connect(audioContext.destination);
+                const startTime = Math.max(nextScheduledTime, audioContext.currentTime);
+                source.start(startTime);
+                activeSources.push(source);
+                // Self-cleanup when this source finishes playing
+                source.onended = () => {
+                    const idx = activeSources.indexOf(source);
+                    if (idx >= 0) activeSources.splice(idx, 1);
+                    // Notify server only when ALL sources have truly finished
+                    if (activeSources.length === 0 && audioQueue.length === 0
+                        && !isPlayingAudio && gen === playbackGeneration) {
+                        if (ws && ws.readyState === WebSocket.OPEN) {
+                            ws.send(JSON.stringify({ type: 'playback_complete' }));
+                        }
+                    }
+                };
+                nextScheduledTime = startTime + duration;
+                const scheduleDelay = Math.max(0, (duration - 0.05) * 1000);
+                setTimeout(() => playNextAudioChunk(gen), scheduleDelay);
+            } catch (error) {
+                playNextAudioChunk(gen);
+            }
+        }
+        
+        async function startMicrophone() {
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia({
+                    audio: { channelCount: 1, sampleRate: SAMPLE_RATE, echoCancellation: true, noiseSuppression: true }
+                });
+                audioContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: SAMPLE_RATE });
+                microphone = audioContext.createMediaStreamSource(stream);
+                processor = audioContext.createScriptProcessor(2048, 1, 1);
+                processor.onaudioprocess = (e) => {
+                    if (!isListening || !ws || ws.readyState !== WebSocket.OPEN) return;
+                    const inputData = e.inputBuffer.getChannelData(0);
+                    const pcm16 = float32ToPCM16(inputData);
+                    ws.send(pcm16.buffer);
+                };
+                microphone.connect(processor);
+                processor.connect(audioContext.destination);
+                isListening = true;
+                setStatus('listening', 'Listening...');
+            } catch (error) {
+                setStatus('error', `Mic error: ${error.message}`);
+            }
+        }
+        
+        function stopMicrophone() {
+            isListening = false;
+            if (processor) { processor.disconnect(); processor = null; }
+            if (microphone) { microphone.disconnect(); microphone = null; }
+            if (audioContext) { audioContext.close(); audioContext = null; }
+        }
+        
+        function float32ToPCM16(float32Array) {
+            const pcm16 = new Int16Array(float32Array.length);
+            for (let i = 0; i < float32Array.length; i++) {
+                const s = Math.max(-1, Math.min(1, float32Array[i]));
+                pcm16[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
+            }
+            return pcm16;
+        }
+        
+        function disconnect() {
+            if (ws) {
+                ws.send(JSON.stringify({ type: 'end_session' }));
+                ws.close();
+            }
+            stopMicrophone();
+        }
+        
+        connectBtn.addEventListener('click', connect);
+        disconnectBtn.addEventListener('click', disconnect);
+        
+        if (!window.WebSocket) {
+            setStatus('error', 'WebSockets not supported');
+            connectBtn.disabled = true;
+        }
+        if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+            setStatus('error', 'Microphone access not supported');
+            connectBtn.disabled = true;
+        }
+    </script>
+</body>
+</html>

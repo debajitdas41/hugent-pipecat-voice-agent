@@ -1,0 +1,13 @@
+# Pipecat Framework with Sarvam integration
+pipecat-ai[sarvam]>=1.0.0
+
+# FastAPI server
+fastapi
+uvicorn
+python-dotenv
+
+# HTTP client for Backend API
+httpx
+
+# Audio processing
+numpy

@@ -1,0 +1,15 @@
+# ── Voice agent ──────────────────────────────────────────────
+.env
+__pycache__/
+*.pyc
+*.pyo
+venv/
+.venv/
+.DS_Store
+*.log
+
+# ── Backend secrets ───────────────────────────────────────────
+backend/.env
+
+# ── Postgres data (if ever mounted locally) ───────────────────
+backend/postgres_data/

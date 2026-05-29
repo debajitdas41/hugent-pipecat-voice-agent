@@ -1,0 +1,70 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Walk-in Registration</title>
+</head>
+<body>
+<h2>Walk-in Registration</h2>
+
+<input id="name" placeholder="Name"><br>
+<input id="age" placeholder="Age"><br>
+<input id="phone" placeholder="WhatsApp Number"><br>
+<input id="dept" placeholder="Department"><br>
+
+<button onclick="estimate()">Estimate Wait</button>
+
+<div id="result"></div>
+
+<script>
+const clinicId = "{{ clinic_id }}";
+let bufferIso = null;
+
+function estimate() {
+    fetch("/walkin/estimate", {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({
+            clinic_id: clinicId
+        })
+    })
+    .then(r => r.json())
+    .then(d => {
+        if (!d.allowed) {
+            document.getElementById("result").innerText = d.message;
+            return;
+        }
+        bufferIso = d.buffer_iso;
+        document.getElementById("result").innerHTML =
+            `Estimated wait ~ ${d.estimated_wait} mins<br>
+             Next buffer at ${d.buffer_at}<br>
+             <button onclick="confirm()">Agree & Wait</button>`;
+    });
+}
+
+function confirm() {
+    fetch("/walkin/confirm", {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({
+            clinic_id: clinicId,
+            name: document.getElementById("name").value,
+            age: document.getElementById("age").value,
+            phone: document.getElementById("phone").value,
+            department: document.getElementById("dept").value,
+            buffer_iso: bufferIso
+        })
+    })
+    .then(r => r.json())
+    .then(d => {
+        if (d.error) {
+            alert(d.error);
+            return;
+        }
+        document.body.innerHTML =
+            `<h3>Token ${d.token}</h3>
+             <p>Please wait. Estimated time: ${d.next_buffer}</p>`;
+    });
+}
+</script>
+</body>
+</html>

@@ -1,0 +1,531 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>SmileBright Dental Care</title>
+<style>
+  *{box-sizing:border-box;margin:0;padding:0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,sans-serif}
+  body{background:#111b21;display:flex;justify-content:center;align-items:center;height:100vh;overflow:hidden}
+
+  /* ─── phone shell ─── */
+  .phone{width:390px;height:780px;background:#e5ddd5;display:flex;flex-direction:column;border-radius:16px;overflow:hidden;box-shadow:0 20px 60px rgba(0,0,0,.6)}
+
+  /* ─── header ─── */
+  .header{background:#075e54;padding:12px 16px;display:flex;align-items:center;gap:12px;flex-shrink:0}
+  .avatar{width:40px;height:40px;border-radius:50%;background:#128c7e;display:flex;align-items:center;justify-content:center;font-size:18px;color:#fff;flex-shrink:0}
+  .header-info h2{color:#fff;font-size:15px;font-weight:600}
+  .header-info p{color:#a8d5cf;font-size:12px}
+  .online-dot{width:8px;height:8px;background:#25d366;border-radius:50%;display:inline-block;margin-right:4px}
+
+  /* ─── wallpaper ─── */
+  .chat-area{flex:1;overflow-y:auto;padding:12px 8px;background-color:#e5ddd5;background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='300' height='300' opacity='.06'%3E%3Ctext y='30' font-size='28'%3E🌿%3C/text%3E%3Ctext x='60' y='80' font-size='24'%3E🌸%3C/text%3E%3Ctext x='140' y='50' font-size='20'%3E❋%3C/text%3E%3Ctext x='200' y='100' font-size='28'%3E🌿%3C/text%3E%3Ctext x='20' y='160' font-size='20'%3E❋%3C/text%3E%3Ctext x='100' y='130' font-size='28'%3E🌸%3C/text%3E%3Ctext x='230' y='150' font-size='24'%3E🌿%3C/text%3E%3Ctext x='50' y='220' font-size='28'%3E❋%3C/text%3E%3Ctext x='160' y='200' font-size='20'%3E🌸%3C/text%3E%3Ctext x='250' y='230' font-size='24'%3E❋%3C/text%3E%3C/svg%3E")}
+  .chat-area::-webkit-scrollbar{width:4px}
+  .chat-area::-webkit-scrollbar-thumb{background:#b2dfdb;border-radius:2px}
+
+  /* ─── bubbles ─── */
+  .bubble-wrap{display:flex;margin-bottom:4px}
+  .bubble-wrap.bot{justify-content:flex-start}
+  .bubble-wrap.user{justify-content:flex-end}
+  .bubble{max-width:78%;padding:8px 10px 6px;border-radius:8px;font-size:14px;line-height:1.45;position:relative;word-break:break-word}
+  .bubble-wrap.bot .bubble{background:#fff;border-top-left-radius:0;box-shadow:0 1px 2px rgba(0,0,0,.12)}
+  .bubble-wrap.user .bubble{background:#dcf8c6;border-top-right-radius:0;box-shadow:0 1px 2px rgba(0,0,0,.12)}
+  .bubble .ts{font-size:10px;color:#999;float:right;margin-left:8px;margin-top:2px}
+  .bubble-wrap.user .bubble .ts::after{content:" ✓✓";color:#53bdeb}
+
+  /* ─── buttons inside bubble ─── */
+  .btn-group{display:flex;flex-direction:column;gap:0;margin-top:4px;border-top:1px solid #e5e5e5}
+  .wa-btn{background:none;border:none;border-top:1px solid #e0e0e0;color:#00a884;font-size:14px;font-weight:500;padding:10px 12px;cursor:pointer;text-align:center;width:100%;transition:background .15s}
+  .wa-btn:first-child{border-top:none}
+  .wa-btn:hover{background:#f5f5f5}
+  .wa-btn:active{background:#e8e8e8}
+
+  /* ─── list picker ─── */
+  .list-btn{background:none;border:1px solid #00a884;color:#00a884;font-size:13px;font-weight:500;padding:8px 16px;border-radius:20px;cursor:pointer;display:flex;align-items:center;gap:6px;margin-top:8px;transition:background .15s}
+  .list-btn:hover{background:#f0faf8}
+  .list-btn svg{width:14px;height:14px;fill:#00a884}
+
+  /* ─── list modal ─── */
+  .modal-overlay{position:absolute;inset:0;background:rgba(0,0,0,.4);display:flex;align-items:flex-end;z-index:100;border-radius:16px}
+  .modal-overlay.hidden{display:none}
+  .modal{background:#fff;border-radius:16px 16px 0 0;width:100%;max-height:70%;overflow-y:auto;padding-bottom:16px}
+  .modal-header{padding:16px;border-bottom:1px solid #eee;display:flex;justify-content:space-between;align-items:center}
+  .modal-header h3{font-size:15px;font-weight:600;color:#111}
+  .modal-close{background:none;border:none;font-size:22px;cursor:pointer;color:#666;line-height:1}
+  .modal-row{padding:12px 16px;cursor:pointer;transition:background .15s;border-bottom:1px solid #f5f5f5}
+  .modal-row:hover{background:#f5faf9}
+  .modal-row .row-title{font-size:14px;color:#111;font-weight:500}
+  .modal-row .row-desc{font-size:12px;color:#888;margin-top:2px}
+
+  /* ─── QR image ─── */
+  .qr-img{max-width:200px;border:4px solid #fff;border-radius:8px;box-shadow:0 2px 8px rgba(0,0,0,.15);display:block;margin-top:4px}
+
+  /* ─── typing indicator ─── */
+  .typing{display:flex;gap:4px;padding:12px 10px;background:#fff;border-radius:8px;border-top-left-radius:0;max-width:60px}
+  .typing span{width:8px;height:8px;background:#bbb;border-radius:50%;animation:bounce .9s infinite}
+  .typing span:nth-child(2){animation-delay:.2s}
+  .typing span:nth-child(3){animation-delay:.4s}
+  @keyframes bounce{0%,80%,100%{transform:translateY(0)}40%{transform:translateY(-6px)}}
+
+  /* ─── call button in header ─── */
+  .call-btn{background:none;border:none;cursor:pointer;padding:6px;border-radius:50%;display:flex;align-items:center;justify-content:center;margin-left:auto;transition:background .15s}
+  .call-btn:hover{background:rgba(255,255,255,.15)}
+  .call-btn svg{width:22px;height:22px;fill:#fff}
+
+  /* ─── call overlay ─── */
+  .call-overlay{position:absolute;inset:0;background:#075e54;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:16px;z-index:200;border-radius:16px}
+  .call-overlay.hidden{display:none}
+  .call-avatar{width:80px;height:80px;border-radius:50%;background:#128c7e;display:flex;align-items:center;justify-content:center;font-size:36px}
+  .call-name{color:#fff;font-size:20px;font-weight:600}
+  .call-status{color:#a8d5cf;font-size:13px}
+  .call-pulse{width:100px;height:100px;border-radius:50%;border:3px solid rgba(255,255,255,.3);animation:pulse 1.5s ease-out infinite;position:absolute}
+  @keyframes pulse{0%{transform:scale(.9);opacity:1}100%{transform:scale(1.6);opacity:0}}
+  .call-pulse-wrap{position:relative;display:flex;align-items:center;justify-content:center;width:100px;height:100px}
+  .end-call-btn{width:60px;height:60px;border-radius:50%;background:#e53935;border:none;cursor:pointer;display:flex;align-items:center;justify-content:center;box-shadow:0 4px 12px rgba(0,0,0,.3);margin-top:16px}
+  .end-call-btn svg{width:28px;height:28px;fill:#fff}
+  .call-mute-btn{width:48px;height:48px;border-radius:50%;background:rgba(255,255,255,.15);border:none;cursor:pointer;display:flex;align-items:center;justify-content:center}
+  .call-mute-btn svg{width:22px;height:22px;fill:#fff}
+  .call-actions{display:flex;gap:32px;align-items:center;margin-top:8px}
+
+  /* ─── input bar ─── */
+  .input-bar{background:#f0f0f0;padding:8px 10px;display:flex;align-items:flex-end;gap:8px;flex-shrink:0}
+  .msg-input{flex:1;border:none;border-radius:24px;padding:10px 16px;font-size:14px;background:#fff;outline:none;resize:none;max-height:100px;overflow-y:auto;line-height:1.4}
+  .send-btn{width:44px;height:44px;border-radius:50%;background:#128c7e;border:none;cursor:pointer;display:flex;align-items:center;justify-content:center;flex-shrink:0;transition:background .15s}
+  .send-btn:hover{background:#0d7066}
+  .send-btn svg{width:20px;height:20px;fill:#fff}
+
+  /* ─── date separator ─── */
+  .date-sep{text-align:center;margin:8px 0}
+  .date-sep span{background:rgba(225,245,254,.9);color:#54656f;font-size:11.5px;padding:4px 12px;border-radius:8px;box-shadow:0 1px 2px rgba(0,0,0,.1)}
+</style>
+</head>
+<body>
+<div class="phone" id="phone" style="position:relative">
+  <!-- Header -->
+  <div class="header">
+    <div class="avatar">🦷</div>
+    <div class="header-info">
+      <h2>SmileBright Dental Care</h2>
+      <p><span class="online-dot"></span>Online</p>
+    </div>
+    <!-- Voice call button -->
+    <button class="call-btn" id="callBtn" title="Voice Call">
+      <svg viewBox="0 0 24 24"><path d="M6.6 10.8c1.4 2.8 3.8 5.1 6.6 6.6l2.2-2.2c.3-.3.7-.4 1-.2 1.1.4 2.3.6 3.6.6.6 0 1 .4 1 1V20c0 .6-.4 1-1 1C11 21 3 13 3 4c0-.6.4-1 1-1h3.5c.6 0 1 .4 1 1 0 1.3.2 2.5.6 3.6.1.3 0 .7-.2 1L6.6 10.8z"/></svg>
+    </button>
+  </div>
+
+  <!-- Call overlay -->
+  <div class="call-overlay hidden" id="callOverlay">
+    <div class="call-pulse-wrap">
+      <div class="call-pulse"></div>
+      <div class="call-avatar">🦷</div>
+    </div>
+    <div class="call-name">SmileBright Dental Care</div>
+    <div class="call-status" id="callStatus">Connecting...</div>
+    <div class="call-actions">
+      <button class="call-mute-btn" id="muteBtn" title="Mute">
+        <svg viewBox="0 0 24 24"><path d="M12 14c1.66 0 3-1.34 3-3V5c0-1.66-1.34-3-3-3S9 3.34 9 5v6c0 1.66 1.34 3 3 3zm-1-9c0-.55.45-1 1-1s1 .45 1 1v6c0 .55-.45 1-1 1s-1-.45-1-1V5zm6 6c0 2.76-2.24 5-5 5s-5-2.24-5-5H5c0 3.53 2.61 6.43 6 6.92V21h2v-3.08c3.39-.49 6-3.39 6-6.92h-2z"/></svg>
+      </button>
+      <button class="end-call-btn" id="endCallBtn" title="End Call">
+        <svg viewBox="0 0 24 24"><path d="M20.01 15.38c-1.23 0-2.42-.2-3.53-.56-.35-.12-.74-.03-1.01.24l-1.57 1.97c-2.83-1.35-5.48-3.9-6.89-6.83l1.95-1.66c.27-.28.35-.67.24-1.02-.37-1.11-.56-2.3-.56-3.53 0-.54-.45-.99-.99-.99H4.19C3.65 3 3 3.24 3 3.99 3 13.28 10.73 21 20.01 21c.71 0 .99-.63.99-1.18v-3.45c0-.54-.45-.99-.99-.99z"/></svg>
+      </button>
+    </div>
+  </div>
+
+  <!-- Chat area -->
+  <div class="chat-area" id="chatArea">
+    <div class="date-sep"><span>Today</span></div>
+  </div>
+
+  <!-- Input bar -->
+  <div class="input-bar">
+    <textarea class="msg-input" id="msgInput" placeholder="Type a message" rows="1"></textarea>
+    <button class="send-btn" id="sendBtn" title="Send">
+      <svg viewBox="0 0 24 24"><path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/></svg>
+    </button>
+  </div>
+
+  <!-- List picker modal -->
+  <div class="modal-overlay hidden" id="modalOverlay">
+    <div class="modal">
+      <div class="modal-header">
+        <h3 id="modalTitle">Choose</h3>
+        <button class="modal-close" id="modalClose">✕</button>
+      </div>
+      <div id="modalBody"></div>
+    </div>
+  </div>
+</div>
+
+<script>
+// ─── Session ─────────────────────────────────────────────────────────────────
+let SESSION_ID = sessionStorage.getItem('wc_session');
+if (!SESSION_ID) { SESSION_ID = crypto.randomUUID(); sessionStorage.setItem('wc_session', SESSION_ID); }
+
+const chatArea = document.getElementById('chatArea');
+const msgInput = document.getElementById('msgInput');
+const sendBtn  = document.getElementById('sendBtn');
+const overlay  = document.getElementById('modalOverlay');
+const modalTitle = document.getElementById('modalTitle');
+const modalBody  = document.getElementById('modalBody');
+let _pendingRows = [];
+
+// ─── Time helper ─────────────────────────────────────────────────────────────
+function now() {
+  return new Date().toLocaleTimeString('en-US',{hour:'2-digit',minute:'2-digit'});
+}
+
+// ─── Scroll ───────────────────────────────────────────────────────────────────
+function scrollDown() { chatArea.scrollTop = chatArea.scrollHeight; }
+
+// ─── Render helpers ──────────────────────────────────────────────────────────
+function addBubble(html, who) {
+  const wrap = document.createElement('div');
+  wrap.className = `bubble-wrap ${who}`;
+  const bub = document.createElement('div');
+  bub.className = 'bubble';
+  bub.innerHTML = html + `<span class="ts">${now()}</span>`;
+  wrap.appendChild(bub);
+  chatArea.appendChild(wrap);
+  scrollDown();
+  return bub;
+}
+
+function renderResponse(r) {
+  if (r.type === 'text') {
+    addBubble(escHtml(r.text).replace(/\*(.*?)\*/g,'<b>$1</b>').replace(/\n/g,'<br>'), 'bot');
+  }
+  else if (r.type === 'buttons') {
+    const wrap = document.createElement('div');
+    wrap.className = 'bubble-wrap bot';
+    const bub = document.createElement('div');
+    bub.className = 'bubble';
+    bub.style.padding = '0';
+    bub.style.overflow = 'hidden';
+    const txt = document.createElement('div');
+    txt.style.padding = '8px 10px 4px';
+    txt.innerHTML = escHtml(r.text).replace(/\*(.*?)\*/g,'<b>$1</b>').replace(/\n/g,'<br>') + `<span class="ts">${now()}</span>`;
+    bub.appendChild(txt);
+    const grp = document.createElement('div');
+    grp.className = 'btn-group';
+    r.buttons.forEach(btn => {
+      const b = document.createElement('button');
+      b.className = 'wa-btn';
+      b.textContent = btn.title;
+      b.onclick = () => sendBtn_click(btn.title, btn.id, null, null);
+      grp.appendChild(b);
+    });
+    bub.appendChild(grp);
+    wrap.appendChild(bub);
+    chatArea.appendChild(wrap);
+    scrollDown();
+  }
+  else if (r.type === 'list') {
+    const wrap = document.createElement('div');
+    wrap.className = 'bubble-wrap bot';
+    const bub = document.createElement('div');
+    bub.className = 'bubble';
+    bub.innerHTML = escHtml(r.text).replace(/\*(.*?)\*/g,'<b>$1</b>').replace(/\n/g,'<br>');
+    const lb = document.createElement('button');
+    lb.className = 'list-btn';
+    lb.innerHTML = `<svg viewBox="0 0 24 24"><path d="M3 13h2v-2H3v2zm0 4h2v-2H3v2zm0-8h2V7H3v2zm4 4h14v-2H7v2zm0 4h14v-2H7v2zM7 7v2h14V7H7z"/></svg>${r.button_text}`;
+    lb.onclick = () => openModal(r.text, r.rows);
+    const ts = document.createElement('span');
+    ts.className = 'ts'; ts.textContent = now();
+    bub.appendChild(lb);
+    bub.appendChild(ts);
+    wrap.appendChild(bub);
+    chatArea.appendChild(wrap);
+    scrollDown();
+  }
+  else if (r.type === 'qr_image') {
+    const wrap = document.createElement('div');
+    wrap.className = 'bubble-wrap bot';
+    const bub = document.createElement('div');
+    bub.className = 'bubble';
+    const img = document.createElement('img');
+    img.src = 'data:image/png;base64,' + r.data;
+    img.className = 'qr-img';
+    img.alt = 'Check-in QR Code';
+    bub.appendChild(img);
+    bub.innerHTML += `<span class="ts">${now()}</span>`;
+    bub.prepend(img);
+    wrap.appendChild(bub);
+    chatArea.appendChild(wrap);
+    scrollDown();
+  }
+}
+
+// ─── Modal ────────────────────────────────────────────────────────────────────
+function openModal(title, rows) {
+  _pendingRows = rows;
+  modalTitle.textContent = title;
+  modalBody.innerHTML = '';
+  rows.forEach(row => {
+    const div = document.createElement('div');
+    div.className = 'modal-row';
+    div.innerHTML = `<div class="row-title">${escHtml(row.title)}</div>${row.description ? `<div class="row-desc">${escHtml(row.description)}</div>` : ''}`;
+    div.onclick = () => { closeModal(); sendBtn_click(row.title, null, row.id, row.title); };
+    modalBody.appendChild(div);
+  });
+  overlay.classList.remove('hidden');
+}
+function closeModal() { overlay.classList.add('hidden'); }
+document.getElementById('modalClose').onclick = closeModal;
+overlay.onclick = e => { if (e.target === overlay) closeModal(); };
+
+// ─── Typing indicator ─────────────────────────────────────────────────────────
+function showTyping() {
+  const wrap = document.createElement('div');
+  wrap.className = 'bubble-wrap bot';
+  wrap.id = 'typingIndicator';
+  const t = document.createElement('div');
+  t.className = 'typing';
+  t.innerHTML = '<span></span><span></span><span></span>';
+  wrap.appendChild(t);
+  chatArea.appendChild(wrap);
+  scrollDown();
+}
+function hideTyping() {
+  const t = document.getElementById('typingIndicator');
+  if (t) t.remove();
+}
+
+// ─── Send ─────────────────────────────────────────────────────────────────────
+function escHtml(s) {
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+async function sendBtn_click(text, btn_id, list_id, list_title) {
+  if (!text && !btn_id && !list_id) return;
+
+  // Show user bubble
+  addBubble(escHtml(text || list_title || ''), 'user');
+
+  // Disable input while waiting
+  msgInput.disabled = true; sendBtn.disabled = true;
+  showTyping();
+
+  const body = { session_id: SESSION_ID, message: text || '' };
+  if (btn_id)    { body.btn_id    = btn_id; }
+  if (list_id)   { body.list_id   = list_id; body.list_title = list_title || ''; }
+
+  try {
+    const res = await fetch('/webchat/send', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify(body)
+    });
+    const data = await res.json();
+    hideTyping();
+    (data.responses || []).forEach(r => renderResponse(r));
+  } catch(e) {
+    hideTyping();
+    addBubble('⚠️ Connection error. Please try again.', 'bot');
+    console.error(e);
+  } finally {
+    msgInput.disabled = false; sendBtn.disabled = false;
+    msgInput.focus();
+  }
+}
+
+// ─── Input events ─────────────────────────────────────────────────────────────
+sendBtn.onclick = () => {
+  const t = msgInput.value.trim();
+  if (!t) return;
+  msgInput.value = '';
+  msgInput.style.height = 'auto';
+  sendBtn_click(t, null, null, null);
+};
+
+msgInput.addEventListener('keydown', e => {
+  if (e.key === 'Enter' && !e.shiftKey) {
+    e.preventDefault();
+    sendBtn.click();
+  }
+});
+
+msgInput.addEventListener('input', () => {
+  msgInput.style.height = 'auto';
+  msgInput.style.height = msgInput.scrollHeight + 'px';
+});
+
+// ─── Voice Call (Local_Voice_V2 WebSocket) ──────────────────────────────────
+const VOICE_WS_URL = 'ws://localhost:19200/ws';
+const callBtn      = document.getElementById('callBtn');
+const callOverlay  = document.getElementById('callOverlay');
+const callStatus   = document.getElementById('callStatus');
+const endCallBtn   = document.getElementById('endCallBtn');
+const muteBtn      = document.getElementById('muteBtn');
+
+const VOICE_SAMPLE_RATE = 16000;
+let _callWs        = null;
+let _audioCtx      = null;
+let _micStream     = null;
+let _micProcessor  = null;
+let _isMuted       = false;
+let _callTimer     = null;
+let _callSeconds   = 0;
+
+// ── scheduled audio queue (exact same as Local_Voice_V2 client) ──
+let _audioQueue        = [];
+let _isPlayingAudio    = false;
+let _nextScheduledTime = 0;
+
+async function _handleAudioChunk(arrayBuffer) {
+  _audioQueue.push(arrayBuffer);
+  if (!_isPlayingAudio) {
+    _isPlayingAudio = true;
+    if (!_audioCtx) return;
+    if (_audioCtx.state === 'suspended') await _audioCtx.resume();
+    _nextScheduledTime = _audioCtx.currentTime;
+    _playNextChunk();
+  }
+}
+
+function _playNextChunk() {
+  if (_audioQueue.length === 0) { _isPlayingAudio = false; return; }
+  if (!_audioCtx) { _isPlayingAudio = false; return; }
+  try {
+    const arrayBuffer = _audioQueue.shift();
+    const pcm16 = new Int16Array(arrayBuffer);
+    const audioBuffer = _audioCtx.createBuffer(1, pcm16.length, VOICE_SAMPLE_RATE);
+    const channelData = audioBuffer.getChannelData(0);
+    for (let i = 0; i < pcm16.length; i++) channelData[i] = pcm16[i] / 32768.0;
+    const duration = pcm16.length / VOICE_SAMPLE_RATE;
+    const source = _audioCtx.createBufferSource();
+    source.buffer = audioBuffer;
+    source.connect(_audioCtx.destination);
+    const startTime = Math.max(_nextScheduledTime, _audioCtx.currentTime);
+    source.start(startTime);
+    _nextScheduledTime = startTime + duration;
+    const scheduleDelay = Math.max(0, (duration - 0.05) * 1000);
+    setTimeout(_playNextChunk, scheduleDelay);
+  } catch(e) {
+    _playNextChunk();
+  }
+}
+
+function _startCallTimer() {
+  _callSeconds = 0;
+  _callTimer = setInterval(() => {
+    _callSeconds++;
+    const m = String(Math.floor(_callSeconds / 60)).padStart(2,'0');
+    const s = String(_callSeconds % 60).padStart(2,'0');
+    callStatus.textContent = `${m}:${s}`;
+  }, 1000);
+}
+
+async function startCall() {
+  callOverlay.classList.remove('hidden');
+  callStatus.textContent = 'Connecting...';
+
+  // Open WebSocket to voice agent
+  let ws;
+  try {
+    ws = new WebSocket(VOICE_WS_URL);
+    _callWs = ws;
+  } catch(e) {
+    callStatus.textContent = 'Could not reach voice agent';
+    setTimeout(endCall, 2000);
+    return;
+  }
+
+  ws.binaryType = 'arraybuffer';
+
+  ws.onopen = async () => {
+    // Send session start
+    ws.send(JSON.stringify({ type: 'start_session', clinic_id: 'clinic_001', phone: SESSION_ID }));
+
+    // Request mic
+    try {
+      _micStream = await navigator.mediaDevices.getUserMedia({ audio: { sampleRate: 16000, channelCount: 1, echoCancellation: true, noiseSuppression: true } });
+    } catch(e) {
+      callStatus.textContent = 'Microphone access denied';
+      setTimeout(endCall, 2000);
+      return;
+    }
+
+    // Set up audio context for sending mic PCM
+    _audioCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
+    const source = _audioCtx.createMediaStreamSource(_micStream);
+    _micProcessor = _audioCtx.createScriptProcessor(4096, 1, 1);
+    _micProcessor.onaudioprocess = (e) => {
+      if (_isMuted || ws.readyState !== WebSocket.OPEN) return;
+      const float32 = e.inputBuffer.getChannelData(0);
+      // Convert Float32 → Int16 PCM
+      const pcm = new Int16Array(float32.length);
+      for (let i = 0; i < float32.length; i++) {
+        pcm[i] = Math.max(-32768, Math.min(32767, float32[i] * 32768));
+      }
+      ws.send(pcm.buffer);
+    };
+    source.connect(_micProcessor);
+    _micProcessor.connect(_audioCtx.destination);
+  };
+
+  ws.onmessage = (event) => {
+    if (typeof event.data === 'string') {
+      // Control message
+      try {
+        const msg = JSON.parse(event.data);
+        if (msg.type === 'session_ready') {
+          callStatus.textContent = 'Connected';
+          _startCallTimer();
+        } else if (msg.type === 'error') {
+          callStatus.textContent = msg.message || 'Error';
+        }
+      } catch(_) {}
+    } else {
+      // Binary audio from agent — scheduled queue playback
+      _handleAudioChunk(event.data);
+    }
+  };
+
+  ws.onclose = () => { endCall(false); };
+  ws.onerror = () => { callStatus.textContent = 'Connection error'; setTimeout(() => endCall(false), 1500); };
+}
+
+function endCall(sendEnd = true) {
+  clearInterval(_callTimer);
+  if (_callWs && sendEnd && _callWs.readyState === WebSocket.OPEN) {
+    _callWs.send(JSON.stringify({ type: 'end_session' }));
+    _callWs.close();
+  }
+  _callWs = null;
+  if (_micProcessor) { _micProcessor.disconnect(); _micProcessor = null; }
+  if (_micStream)    { _micStream.getTracks().forEach(t => t.stop()); _micStream = null; }
+  if (_audioCtx)     { _audioCtx.close(); _audioCtx = null; }
+  _isMuted = false;
+  _audioQueue = []; _isPlayingAudio = false;
+  muteBtn.style.background = 'rgba(255,255,255,.15)';
+  callOverlay.classList.add('hidden');
+}
+
+callBtn.onclick = () => { if (!_callWs) startCall(); };
+endCallBtn.onclick = () => endCall(true);
+muteBtn.onclick = () => {
+  _isMuted = !_isMuted;
+  muteBtn.style.background = _isMuted ? 'rgba(255,255,255,.4)' : 'rgba(255,255,255,.15)';
+  muteBtn.title = _isMuted ? 'Unmute' : 'Mute';
+};
+
+// ─── Hi starter button on load ───────────────────────────────────────────────
+window.addEventListener('load', () => {
+  const wrap = document.createElement('div');
+  wrap.id = 'hiStarter';
+  wrap.style.cssText = 'display:flex;justify-content:center;padding:24px 0 8px';
+  const btn = document.createElement('button');
+  btn.textContent = '👋 Tap to say Hi';
+  btn.style.cssText = 'background:#25d366;color:#fff;border:none;border-radius:24px;padding:12px 28px;font-size:15px;font-weight:600;cursor:pointer;box-shadow:0 4px 12px rgba(0,0,0,.2)';
+  btn.onclick = () => {
+    wrap.remove();
+    sendBtn_click('Hi', null, null, null);
+  };
+  wrap.appendChild(btn);
+  chatArea.appendChild(wrap);
+  scrollDown();
+});
+</script>
+</body>
+</html>

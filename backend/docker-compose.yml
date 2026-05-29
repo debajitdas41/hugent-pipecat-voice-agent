@@ -1,0 +1,87 @@
+version: "3.9"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Backend stack for Pipecat-Voice-Agent
+#
+# Services:
+#   postgres  — PostgreSQL 16 (persistent: clinics, users, appointments)
+#   redis     — Redis 7       (sessions and queue state)
+#   api       — FastAPI + Flask backend (port 8000)
+#   worker    — APScheduler slot-tick worker
+#
+# First-time setup:
+#   1. cp .env.example .env  (and fill in APP_SECRET)
+#   2. docker-compose up -d --build
+#   3. docker exec clinic-backend-api alembic upgrade head
+#   4. docker exec clinic-backend-api python seed_clinic.py
+# ─────────────────────────────────────────────────────────────────────────────
+
+services:
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: hugent-postgres
+    environment:
+      POSTGRES_USER: hugent
+      POSTGRES_PASSWORD: hugent
+      POSTGRES_DB: hugentai
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U hugent -d hugentai"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    container_name: hugent-redis
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  api:
+    build: .
+    container_name: clinic-backend-api
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    environment:
+      - DATABASE_URL=postgresql+psycopg2://hugent:hugent@postgres:5432/hugentai
+      - REDIS_HOST=redis-17507.c264.ap-south-1-1.ec2.cloud.redislabs.com
+      - REDIS_PORT=17507
+      - REDIS_PASSWORD=w07o5WupFFxlZRCYLNd9pZgNjPHHusU2
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  worker:
+    build: .
+    container_name: clinic-backend-worker
+    command: python scheduler.py
+    env_file:
+      - .env
+    environment:
+      - DATABASE_URL=postgresql+psycopg2://hugent:hugent@postgres:5432/hugentai
+      - REDIS_HOST=redis-17507.c264.ap-south-1-1.ec2.cloud.redislabs.com
+      - REDIS_PORT=17507
+      - REDIS_PASSWORD=w07o5WupFFxlZRCYLNd9pZgNjPHHusU2
+      - SLOT_TICK_API_URL=http://api:8000/slot_tick
+    depends_on:
+      - api
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
