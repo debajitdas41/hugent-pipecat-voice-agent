@@ -87,7 +87,13 @@ class SarvamMLLMProcessor(FrameProcessor):
             logger.warning("[SarvamMLLM] No user message found in context, skipping")
             return
 
-        logger.debug(f"[LLM] turn start: '{user_text[:80]}'")
+        # Keep last 6 messages (3 exchanges) — booking draft is injected fresh into
+        # the system prompt every turn, so older history is redundant and just inflates
+        # prompt tokens (~2950 → ~1600), cutting TTFT significantly.
+        if len(history) > 6:
+            history = history[-6:]
+
+        logger.debug(f"[LLM] turn start: '{user_text[:80]}' history={len(history)}msgs")
 
         await self.push_frame(LLMFullResponseStartFrame())
 

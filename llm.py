@@ -34,6 +34,7 @@ def _model() -> str:
     global _MODEL
     if _MODEL is None:
         _MODEL = os.getenv("LLM_MODEL", "sarvam-m")
+        logger.info(f"[LLM] Using model: {_MODEL}")
     return _MODEL
 
 
@@ -243,7 +244,8 @@ Now output:
     body = {
         "model": _model(),
         "messages": messages,
-        "temperature": 0.7,
+        "temperature": 0.3,
+        "max_tokens": 200,         # voice: 1-2 sentences; caps budget for lower TTFT
         "stream": True,
         "reasoning_effort": None,  # JSON null → disable think mode on sarvam-m
     }
@@ -391,7 +393,7 @@ async def extract_json(
         data = _chat_completion(
             messages=messages,
             temperature=temp,
-            max_tokens=1500,
+            max_tokens=200,                  # JSON object is ~60 tokens; 200 is ample
             reasoning_effort=None,          # JSON null → disable reasoning
         )
         content, reasoning, finish, usage = _parse(data)

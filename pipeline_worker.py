@@ -137,11 +137,13 @@ class PipecatWorker:
                 model=tts_model,
                 voice=tts_speaker,
                 language="en-IN",
+                pace=1.05,
             )
             tts = SarvamTTSService(
                 api_key=sarvam_api_key,
                 sample_rate=16000,   # Must match browser AudioWorklet (16kHz)
                 settings=tts_settings,
+                min_buffer_size=25,
             )
 
             # ── 2. Create LLM context with system prompt ──
