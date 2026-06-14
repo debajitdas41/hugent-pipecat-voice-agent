@@ -31,6 +31,8 @@ SERVER_PORT = int(os.getenv("SERVER_PORT", "19200"))
 DEFAULT_CLINIC_ID = os.getenv("DEFAULT_CLINIC_ID", "clinic_001")
 DEFAULT_PHONE = os.getenv("DEFAULT_PHONE", "+919999999999")
 SESSIONS = {} 
+TELECOM_SAMPLE_RATE = 8000
+PIPELINE_SAMPLE_RATE = 16000
 
 app = FastAPI(title="Sarvam AI Voice Agent - Pipecat")
 
@@ -38,6 +40,87 @@ from pipeline_worker import PipecatWorker
 
 # Store active pipeline workers (replaces sessions dict from v2)
 workers: dict[str, PipecatWorker] = {}
+
+
+class FreJunAudioBuffer:
+    """
+    FIFO pacing buffer for FreJun telephony compatibility.
+    
+    Accumulates variable-sized PCM chunks from Sarvam TTS and emits stable,
+    properly-sized chunks to prevent audio player starvation on FreJun's
+    telephony connection.
+    
+    Target: 500ms @ 8kHz Linear16 PCM (1 channel) = 8000 bytes
+    """
+    
+    def __init__(self, sample_rate: int = 8000, target_ms: int = 500):
+        """
+        Initialize the pacing buffer.
+        
+        Args:
+            sample_rate: Sample rate in Hz (default 8000 for telephony)
+            target_ms: Target chunk duration in milliseconds (default 500ms)
+        """
+        self.sample_rate = sample_rate
+        self.target_ms = target_ms
+        self.bytes_per_sample = 2  # 16-bit PCM
+        self.target_bytes = (sample_rate * target_ms // 1000) * self.bytes_per_sample
+        self.buffer = bytearray()
+        
+        logger.debug(
+            f"FreJunAudioBuffer initialized: {sample_rate}Hz, "
+            f"target={target_ms}ms ({self.target_bytes} bytes)"
+        )
+    
+    def add_chunk(self, pcm_bytes: bytes) -> list[bytes]:
+        """
+        Add PCM bytes to the buffer and return any ready chunks.
+        
+        Args:
+            pcm_bytes: Raw PCM data from TTS
+            
+        Returns:
+            List of chunks that have reached the target threshold
+        """
+        self.buffer.extend(pcm_bytes)
+        ready_chunks = []
+        
+        while len(self.buffer) >= self.target_bytes:
+            chunk = bytes(self.buffer[:self.target_bytes])
+            del self.buffer[:self.target_bytes]
+            ready_chunks.append(chunk)
+            logger.debug(
+                f"Emitting buffered chunk: {len(chunk)} bytes "
+                f"(buffer now: {len(self.buffer)} bytes)"
+            )
+        
+        return ready_chunks
+    
+    def flush(self) -> bytes:
+        """
+        Return any remaining buffered bytes (for end of TTS generation).
+        
+        Returns:
+            Remaining bytes in buffer, or empty bytes if buffer is empty
+        """
+        if self.buffer:
+            result = bytes(self.buffer)
+            remaining_ms = len(result) / self.target_bytes * self.target_ms
+            logger.debug(
+                f"Flushing trailing buffer: {len(result)} bytes (~{remaining_ms:.1f}ms)"
+            )
+            self.buffer.clear()
+            return result
+        return b""
+    
+    def is_empty(self) -> bool:
+        """Check if buffer is empty."""
+        return len(self.buffer) == 0
+    
+    def get_buffer_size_ms(self) -> float:
+        """Get current buffer size in milliseconds."""
+        return len(self.buffer) / self.target_bytes * self.target_ms
+
 
 class Clinic(BaseModel):
     id: str
@@ -109,7 +192,7 @@ class Session(BaseModel):
     clinic: Clinic
     from_number: str
 
-class IncomingCallPayload(BaseModel):
+class CallFlowRequest(BaseModel):
     call_id: str
     account_id: str
     from_number: str
@@ -118,7 +201,7 @@ class IncomingCallPayload(BaseModel):
     direction: str
     
 @app.post("/incoming-call")
-async def incoming_call(payload: IncomingCallPayload, request: Request) -> Dict:
+async def incoming_call(payload: CallFlowRequest, request: Request) -> Dict:
     call_id = payload.call_id
     from_number = payload.from_number
     to_number = payload.to_number
@@ -134,19 +217,21 @@ async def incoming_call(payload: IncomingCallPayload, request: Request) -> Dict:
     return {
         "action": "stream",
         "ws_url": f"wss://{host_url}/ws-telecom",
-        "chunk_size": 1000,
+        "chunk_size": 640,
         "sample_rate": "16k"
     }
-
 
 @app.websocket("/ws-telecom")
 async def websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
+    flush_buffer_fn = None
 
     try:
         while True:
             message = await websocket.receive()
+            logger.debug(f"Received WebSocket message: {message}")
             message = json.loads(message["text"])
+            
             if message["type"] == "start":
                 print("Received start message:", message)
                 session = SESSIONS.get(message["call_id"])
@@ -156,24 +241,66 @@ async def websocket_endpoint(websocket: WebSocket):
                     phone = session.clinic.phone_number
                     logger.info(f"Session start: {session_id} | {clinic_id} | {phone}")
 
-                    # Callback to send audio back to client
-                    async def send_audio(pcm_bytes: bytes):
-                        # {
-                        #     "type": "audio",
-                        #     "audio_b64": {BASE64_ENCODED_AUDIO_CHUNK},
-                        #     "chunk_id": 123
-                        # }
-                        audio_msg = {
-                            "type": "audio",
-                            "audio_b64": base64.b64encode(pcm_bytes).decode("utf-8"),
-                            "chunk_id": int(datetime.now().timestamp() * 1000)
-                        }
-                        
+                    stream_id = message.get("stream_id")
+                    message_id = 1
+                    
+                    # Initialize FreJun audio pacing buffer (600ms @ 8kHz = 8000 bytes)
+                    frejun_buffer = FreJunAudioBuffer(sample_rate=TELECOM_SAMPLE_RATE, target_ms=640)
+                    chunk_index = 1
+
+                    async def send_audio(pcm_bytes: bytes = b"", end_of_tts: bool = False):
+                        nonlocal message_id, chunk_index
                         try:
-                            if websocket.client_state.name == "CONNECTED":
-                                await websocket.send_text(json.dumps(audio_msg))
+                            # Add incoming TTS chunk to pacing buffer
+                            ready_chunks = frejun_buffer.add_chunk(pcm_bytes)
+                            
+                            # Send all ready chunks that meet the 500ms threshold
+                            for chunk in ready_chunks:
+                                audio_msg = {
+                                    "type": "audio",
+                                    "audio_b64": base64.b64encode(chunk).decode("utf-8"),
+                                    "chunk_id": message_id
+                                }
+                                message_id += 1
+                                if websocket.client_state.name == "CONNECTED":
+                                    await websocket.send_text(json.dumps(audio_msg))
+                                    logger.debug(f"Sent paced audio chunk: {len(chunk)} bytes (msg_id={message_id-1})")
+                            
+                            if end_of_tts:
+                                # Flush any remaining buffered audio at end of TTS generation
+                                remaining = frejun_buffer.flush()
+                                if remaining:
+                                    audio_msg = {
+                                        "type": "audio",
+                                        "audio_b64": base64.b64encode(remaining).decode("utf-8"),
+                                        "chunk_id": message_id
+                                    }
+                                    message_id += 1
+                                    if websocket.client_state.name == "CONNECTED":
+                                        await websocket.send_text(json.dumps(audio_msg))
+                                        logger.debug(f"Flushed final audio chunk: {len(remaining)} bytes (msg_id={message_id-1})")
                         except Exception as e:
                             logger.error(f"Error sending audio: {e}")
+                    
+                    async def flush_frejun_buffer():
+                        """Flush remaining buffered audio when TTS generation finishes."""
+                        nonlocal message_id
+                        remaining = frejun_buffer.flush()
+                        if remaining:
+                            try:
+                                audio_msg = {
+                                    "type": "audio",
+                                    "audio_b64": base64.b64encode(remaining).decode("utf-8"),
+                                    "chunk_id": message_id
+                                }
+                                message_id += 1
+                                if websocket.client_state.name == "CONNECTED":
+                                    await websocket.send_text(json.dumps(audio_msg))
+                                    logger.info(f"Flushed trailing audio: {len(remaining)} bytes (msg_id={message_id-1})")
+                            except Exception as e:
+                                logger.error(f"Error flushing audio buffer: {e}")
+                    
+                    flush_buffer_fn = flush_frejun_buffer
 
                     # Callback to send control messages back to client
                     async def send_control(msg: dict):
@@ -196,13 +323,6 @@ async def websocket_endpoint(websocket: WebSocket):
 
                     # Start the pipeline (non-blocking)
                     await worker.start()
-
-                    await websocket.send_text(json.dumps({
-                        "type": "session_ready",
-                        "session_id": session_id,
-                        "clinic_id": clinic_id,
-                        "phone": phone,
-                    }))
 
                 except json.JSONDecodeError:
                     logger.error("Invalid JSON in control message")
@@ -227,6 +347,11 @@ async def websocket_endpoint(websocket: WebSocket):
         except Exception:
             pass
     finally:
+        if flush_buffer_fn is not None:
+            try:
+                await flush_buffer_fn()
+            except Exception as e:
+                logger.error(f"Error flushing outgoing audio buffer: {e}")
         await worker.cleanup()
         del worker
 
