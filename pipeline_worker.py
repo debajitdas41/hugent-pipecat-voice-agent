@@ -141,7 +141,7 @@ class PipecatWorker:
             )
             tts = SarvamTTSService(
                 api_key=sarvam_api_key,
-                sample_rate=16000,   # Must match browser AudioWorklet (16kHz)
+                sample_rate=8000,   # Must match browser AudioWorklet (16kHz)
                 settings=tts_settings,
                 min_buffer_size=25,
             )
@@ -216,7 +216,7 @@ class PipecatWorker:
             )
 
             # ── 7. Create pipeline runner and start in background ──
-            self.runner = PipelineRunner()
+            self.runner = PipelineRunner(handle_sigint=False)  # We handle shutdown ourselves in cleanup()
             self.pipeline_task = asyncio.create_task(self.runner.run(self.task))
 
             logger.info(f"[{self.session_id}] Pipecat pipeline started in background")

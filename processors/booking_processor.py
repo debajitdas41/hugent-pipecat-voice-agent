@@ -345,7 +345,7 @@ class BookingProcessor(FrameProcessor):
                     target_language_code=language,
                     speaker=self._tts_speaker,
                     output_audio_codec="linear16",
-                    speech_sample_rate=16000,
+                    speech_sample_rate=8000,
                 )
                 await ws.convert(text)
                 await ws.flush()
