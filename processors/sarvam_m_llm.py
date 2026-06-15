@@ -101,12 +101,30 @@ class SarvamMLLMProcessor(FrameProcessor):
         t_first_token: Optional[float] = None
         response_parts: list[str] = []
 
-        # Stateful bracket filter: LLM sometimes emits `[ slot check.. ]` or similar
-        # action placeholders. These contain no alphabetic chars and cause Sarvam TTS
-        # to reject with 400. We strip any `[...]` block entirely before pushing frames.
-        # Brackets can span multiple streaming chunks, so state is tracked across chunks.
+        # Stateful bracket filter + sentence accumulator.
+        #
+        # Problem: pushing one TextFrame per token causes Pipecat's TTS sentence
+        # assembler to re-scan the entire accumulated buffer on every new frame and
+        # re-fire run_tts() for already-seen sentences (observed: 60+ repeats of the
+        # same sentence per turn).
+        #
+        # Fix: accumulate tokens here and only push a TextFrame when a complete
+        # sentence boundary is detected (. ? ! । \n). The TTS receives full sentences,
+        # never partial tokens, so each sentence is synthesised exactly once.
         _in_bracket: bool = False
         _bracket_buf: str = ""
+        _sentence_buf: str = ""
+        _SENTENCE_END = set(".?!\n\u0964\u0965")  # includes Devanagari danda
+
+        async def _flush_sentence(text: str) -> None:
+            """Push a complete sentence as a single TextFrame.
+            Trailing space ensures Pipecat's TTS buffer inserts a word gap
+            between consecutive sentences instead of jamming them together.
+            """
+            text = text.strip()
+            if text:
+                logger.debug(f"[LLM] sentence → TTS: '{text[:80]}'")
+                await self.push_frame(TextFrame(text + " "))
 
         try:
             async for chunk in llm_module.generate_response_streaming(
@@ -115,44 +133,44 @@ class SarvamMLLMProcessor(FrameProcessor):
                 user_text=user_text,
                 with_extraction=False,
             ):
-                # generate_response_streaming can yield dicts (extraction) or strings
                 if not (isinstance(chunk, str) and chunk):
                     continue
 
-                # ── Bracket filter ────────────────────────────────────────────
-                # Walk through the chunk character-by-character, emitting only
-                # text that is outside any `[...]` block.
-                clean_parts: list[str] = []
+                # Walk character-by-character: bracket filter + sentence split
                 for ch in chunk:
                     if _in_bracket:
                         if ch == "]":
-                            # End of bracket block — discard accumulated content
                             if _bracket_buf.strip():
-                                logger.debug(
-                                    f"[LLM] Filtered bracket block: [{_bracket_buf}]"
-                                )
+                                logger.debug(f"[LLM] Filtered bracket: [{_bracket_buf}]")
                             _bracket_buf = ""
                             _in_bracket = False
                         else:
                             _bracket_buf += ch
-                    else:
-                        if ch == "[":
-                            _in_bracket = True
-                            _bracket_buf = ""
-                        else:
-                            clean_parts.append(ch)
+                        continue
 
-                clean = "".join(clean_parts)
-                if not clean:
-                    continue
-                # ── End bracket filter ────────────────────────────────────────
+                    if ch == "[":
+                        _in_bracket = True
+                        _bracket_buf = ""
+                        continue
 
-                if t_first_token is None:
-                    t_first_token = time.monotonic()
-                response_parts.append(clean)
-                await self.push_frame(TextFrame(clean))
+                    _sentence_buf += ch
+
+                    if ch in _SENTENCE_END and _sentence_buf.strip():
+                        if t_first_token is None:
+                            t_first_token = time.monotonic()
+                        response_parts.append(_sentence_buf)
+                        await _flush_sentence(_sentence_buf)
+                        _sentence_buf = ""
+
         except Exception as e:
             logger.error(f"[LLM] Streaming error: {e}")
+
+        # Flush any remaining text (response didn't end with punctuation)
+        if _sentence_buf.strip():
+            if t_first_token is None:
+                t_first_token = time.monotonic()
+            response_parts.append(_sentence_buf)
+            await _flush_sentence(_sentence_buf)
 
         await self.push_frame(LLMFullResponseEndFrame())
 

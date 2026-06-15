@@ -27,9 +27,6 @@ class AudioOutputProcessor(FrameProcessor):
 
     async def process_frame(self, frame: Frame, direction: FrameDirection):
         await super().process_frame(frame, direction)
-        # OutputAudioRawFrame is the terminal audio frame from TTS (TTSAudioRawFrame extends it)
-        # No direction check needed — audio always flows downstream here
-        logger.info(f"AudioOutputProcessor received frame: {type(frame).__name__}, direction: {direction.name}")
         if isinstance(frame, TTSAudioRawFrame):
             try:
                 await self.on_audio_chunk(bytes(frame.audio))
@@ -38,9 +35,8 @@ class AudioOutputProcessor(FrameProcessor):
         elif isinstance(frame, TTSStoppedFrame):
             try:
                 await self.on_audio_chunk(end_of_tts=True)
-                logger.info(f"Sent end-of-TTS audio chunk to WebSocket")
+                logger.debug("TTS stream ended — end_of_tts flushed")
             except Exception as e:
-                logger.error(f"Error sending audio to WebSocket: {e}")
+                logger.error(f"Error sending end-of-TTS signal: {e}")
         else:
-            # Pass non-audio frames downstream (EndFrame, metrics, etc.)
             await self.push_frame(frame, direction)

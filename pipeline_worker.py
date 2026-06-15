@@ -66,6 +66,7 @@ class PipecatWorker:
         phone: str,
         on_audio_chunk: Callable[[bytes], Awaitable[None]],
         on_control_message: Callable[[dict], Awaitable[None]],
+        on_barge_in: Optional[Callable[[], Awaitable[None]]] = None,
     ):
         self.session_id = session_id
         self.clinic_id = clinic_id
@@ -73,10 +74,13 @@ class PipecatWorker:
         self.on_audio_chunk = on_audio_chunk
         self.on_control_message = on_control_message
 
+        self.on_barge_in = on_barge_in
+
         self.pipeline: Optional[Pipeline] = None
         self.task: Optional[PipelineTask] = None
         self.runner: Optional[PipelineRunner] = None
         self.pipeline_task: Optional[asyncio.Task] = None  # Background task running the pipeline
+        self._booking_processor: Optional["BookingProcessor"] = None  # kept for delayed greeting
 
         self.language = "en"  # Start with English, switch on Turn 2
         self.turn_count = 0
@@ -178,14 +182,13 @@ class PipecatWorker:
                 llm_context=context,
                 clinic_info=clinic_info,
                 on_control_message=self.on_control_message,
-                # Direct TTS (v2 mechanism): BookingProcessor generates greeting/ACK
-                # audio itself, bypassing Pipecat's TTS pipeline so VAD's
-                # broadcast_interruption() cannot cancel the greeting mid-sentence.
                 on_audio_chunk=self.on_audio_chunk,
                 sarvam_api_key=sarvam_api_key,
                 tts_model=tts_model,
                 tts_speaker=tts_speaker,
+                on_barge_in=self.on_barge_in,
             )
+            self._booking_processor = booking_processor
             assistant_capture = AssistantCaptureProcessor()
 
             # ── 5. Build pipeline (frame flow) ──
@@ -203,6 +206,7 @@ class PipecatWorker:
             ])
 
             # ── 6. Create pipeline task ──
+            pipeline_idle_timeout = float(os.getenv("PIPELINE_IDLE_TIMEOUT_SECS", "120"))
             self.task = PipelineTask(
                 self.pipeline,
                 params=PipelineParams(
@@ -210,7 +214,7 @@ class PipecatWorker:
                     enable_metrics=False,
                     enable_usage_metrics=False,
                 ),
-                idle_timeout_secs=None,
+                idle_timeout_secs=pipeline_idle_timeout,
                 enable_turn_tracking=False,
                 enable_rtvi=False,
             )
@@ -218,6 +222,10 @@ class PipecatWorker:
             # ── 7. Create pipeline runner and start in background ──
             self.runner = PipelineRunner(handle_sigint=False)  # We handle shutdown ourselves in cleanup()
             self.pipeline_task = asyncio.create_task(self.runner.run(self.task))
+
+            # ── 8. Proactive greeting — speak before user says anything ──
+            # Short delay lets the Sarvam STT WebSocket connect before audio is sent.
+            asyncio.create_task(self._delayed_greeting(delay=1.0))
 
             logger.info(f"[{self.session_id}] Pipecat pipeline started in background")
 
@@ -242,6 +250,17 @@ class PipecatWorker:
 
         # Queue frame into pipeline (non-blocking)
         await self.task.queue_frame(frame)
+
+    async def _delayed_greeting(self, delay: float = 1.0):
+        """Wait briefly for STT to connect, then trigger the proactive greeting."""
+        try:
+            await asyncio.sleep(delay)
+            if self._booking_processor is not None:
+                await self._booking_processor.trigger_greeting()
+        except asyncio.CancelledError:
+            pass
+        except Exception as e:
+            logger.error(f"[{self.session_id}] Delayed greeting error: {e}")
 
     async def _fetch_clinic_info(self) -> dict:
         """Fetch clinic info once at session start to avoid per-turn API calls."""
@@ -268,6 +287,10 @@ class PipecatWorker:
         Stop the pipeline and cleanup resources.
         """
         try:
+            # Cancel any pending booking processor transcript tasks
+            if self._booking_processor is not None:
+                self._booking_processor.cancel_pending_tasks()
+
             if self.task:
                 # Cancel the pipeline task gracefully
                 await self.task.cancel()

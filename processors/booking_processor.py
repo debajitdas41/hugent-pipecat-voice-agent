@@ -170,17 +170,17 @@ _CONNECTOR_WORDS = {
 
 
 def _is_likely_incomplete(text: str) -> bool:
-    """Return True if the utterance appears to be cut off mid-sentence."""
+    """Return True only if the utterance ends with a connector word (clearly cut off mid-sentence).
+
+    The previous heuristic also flagged any 1-2 word utterance as incomplete, which caused
+    a 1.5s stitch delay on every short but complete answer like "24" or "Dental".
+    Now only connector-ending utterances (e.g. "my name is", "I want to") are held.
+    """
     words = text.strip().split()
     if not words:
         return False
     last = words[-1].lower().rstrip(".,!?;:")
-    if last in _CONNECTOR_WORDS:
-        return True
-    # Very short non-filler utterances are probably incomplete
-    if len(words) <= 2 and not _PURE_FILLER_RE.match(text):
-        return True
-    return False
+    return last in _CONNECTOR_WORDS
 
 logger = logging.getLogger("booking")
 
@@ -209,6 +209,7 @@ class BookingProcessor(FrameProcessor):
         sarvam_api_key: str = "",
         tts_model: str = "bulbul:v3",
         tts_speaker: str = "priya",
+        on_barge_in: Optional[Callable[[], Awaitable[None]]] = None,
     ):
         super().__init__()
         self.session_id = session_id
@@ -218,6 +219,7 @@ class BookingProcessor(FrameProcessor):
         self._llm_context = llm_context
         self._clinic_info = clinic_info
         self._on_control = on_control_message
+        self._on_barge_in = on_barge_in
 
         # Direct TTS (v2 mechanism) — bypasses Pipecat TTS pipeline so
         # broadcast_interruption() from VAD cannot cancel greeting/ACK audio.
@@ -256,6 +258,8 @@ class BookingProcessor(FrameProcessor):
 
         # Background extraction task (multiple can run concurrently — do NOT cancel on barge-in)
         self._extraction_task: Optional[asyncio.Task] = None
+        # Track all transcript tasks so we can cancel them on cleanup
+        self._transcript_tasks: set[asyncio.Task] = set()
 
         # Lock to serialize process_turn() — concurrent extractions are fine,
         # but process_turn() mutates BookingSession.draft and must not be interleaved.
@@ -294,16 +298,24 @@ class BookingProcessor(FrameProcessor):
 
         if direction == FrameDirection.DOWNSTREAM and isinstance(frame, TranscriptionFrame):
             # Spawn background task — process_frame returns immediately
-            asyncio.create_task(self._safe_handle_transcript(frame))
+            task = asyncio.create_task(self._safe_handle_transcript(frame))
+            self._transcript_tasks.add(task)
+            task.add_done_callback(self._transcript_tasks.discard)
         elif isinstance(frame, UserStartedSpeakingFrame):
             # ── Barge-in detected ──────────────────────────────────────────
-            # 1. Tell browser to flush all buffered/playing audio immediately
+            # 1. Discard any buffered audio in the telephony pacing buffer
+            if self._on_barge_in:
+                try:
+                    await self._on_barge_in()
+                except Exception:
+                    pass
+            # 2. Tell browser to flush all buffered/playing audio
             if self._on_control:
                 try:
                     await self._on_control({"type": "stop_audio"})
                 except Exception:
                     pass
-            # 2. Interrupt any in-flight _speak_direct stream
+            # 3. Interrupt any in-flight _speak_direct stream
             self._direct_tts_interrupted = True
             # NOTE: do NOT cancel in-flight extraction — it must complete so
             # booking state accumulates. Cancelling was the root cause of
@@ -336,6 +348,7 @@ class BookingProcessor(FrameProcessor):
         # Reset interruption flag before starting this stream
         self._direct_tts_interrupted = False
         logger.debug(f"[{self.session_id}] Direct TTS [{language}]: {text[:60]}")
+        interrupted = False
         try:
             async with self._tts_client.text_to_speech_streaming.connect(
                 model=self._tts_model,
@@ -355,6 +368,7 @@ class BookingProcessor(FrameProcessor):
                         logger.info(
                             f"[{self.session_id}] Direct TTS interrupted by barge-in"
                         )
+                        interrupted = True
                         break
                     if isinstance(msg, AudioOutput):
                         pcm_bytes = base64.b64decode(msg.data.audio)
@@ -368,15 +382,58 @@ class BookingProcessor(FrameProcessor):
                             break
         except Exception as e:
             logger.error(f"[{self.session_id}] Direct TTS error: {e}")
+        finally:
+            # Always signal end-of-TTS so the pacing buffer flushes its tail.
+            # On barge-in the buffer was already cleared; this is a no-op for
+            # the pacing buffer but resets any downstream state cleanly.
+            if not interrupted and self._on_audio_chunk:
+                try:
+                    await self._on_audio_chunk(b"", end_of_tts=True)
+                except Exception as e:
+                    logger.debug(f"[{self.session_id}] end_of_tts flush error: {e}")
 
     # ──────────────────────────────────────────────────────────────────────────
     #  Turn handler (runs in background task, NOT in process_frame)
     # ──────────────────────────────────────────────────────────────────────────
 
+    def cancel_pending_tasks(self) -> None:
+        """Cancel all in-flight transcript tasks (called on session cleanup)."""
+        for task in list(self._transcript_tasks):
+            if not task.done():
+                task.cancel()
+        self._transcript_tasks.clear()
+
+    async def trigger_greeting(self) -> None:
+        """
+        Proactively speak the language-selection greeting without waiting for
+        the first user utterance. Called by PipecatWorker shortly after
+        the pipeline starts.
+        """
+        if self.language_selection_asked:
+            # Already greeted (e.g. user spoke before the delay elapsed)
+            return
+        clinic_name = self._clinic_info.get("name", "our clinic")
+        greeting = _LANGUAGE_SELECTION_GREETING.replace("{clinic_name}", clinic_name)
+        self.language_selection_asked = True
+        logger.info(f"[{self.session_id}] Proactive greeting: '{greeting[:80]}'")
+        if self._on_control:
+            try:
+                await self._on_control({"type": "response", "text": greeting})
+            except Exception:
+                pass
+        await self._speak_direct(greeting, "en-IN")
+
     async def _safe_handle_transcript(self, frame: TranscriptionFrame):
-        """Wraps _handle_transcript with error recovery."""
+        """Wraps _handle_transcript with error recovery and a per-turn timeout."""
+        _TURN_TIMEOUT = float(__import__("os").getenv("TURN_TIMEOUT_SECS", "40"))
         try:
-            await self._handle_transcript(frame)
+            await asyncio.wait_for(self._handle_transcript(frame), timeout=_TURN_TIMEOUT)
+        except asyncio.TimeoutError:
+            logger.warning(
+                f"[{self.session_id}] Turn handler timed out after {_TURN_TIMEOUT}s — "
+                "pushing frame in degraded mode"
+            )
+            await self.push_frame(frame, FrameDirection.DOWNSTREAM)
         except asyncio.CancelledError:
             raise
         except Exception as e:
@@ -483,19 +540,38 @@ class BookingProcessor(FrameProcessor):
                 return  # Never send to LLM during language selection
 
         # ── Mid-call language switch detection ────────────────────────────────
-        # Handles "Hindi mein bolo", "speak in Tamil", or short utterances like
-        # "Hindi please". Only fires if language actually changes.
+        # Language is LOCKED after the selection phase.
+        # A switch is only allowed when the user explicitly asks to change:
+        #   "Hindi mein bolo", "speak in Tamil", "switch to Kannada",
+        #   "change language", "Hindi mein baat karo", etc.
+        # Short utterances that merely contain a language keyword (e.g. a name
+        # like "Kannada Raju" or a city name) do NOT trigger a switch.
+        # STT language_code is completely ignored here — see comment below.
         switch_lang = self._resolve_language_keywords(user_text)
         if switch_lang and switch_lang != self.language:
-            words = user_text.split()
+            _lower = user_text.lower()
             is_explicit_switch = any(
-                p in user_text.lower()
-                for p in ("mein bolo", "mein bol", "speak in", "switch to",
-                          "\u092d\u093e\u0937\u093e", "language", "\u09ad\u09be\u09b7\u09be",
-                          "\u0bae\u0bca\u0bb4\u0bbf", "\u0c2d\u0c3e\u0c37", "\u0cad\u0cbe\u0cb7\u0cc6",
-                          "\u0d2d\u0d3e\u0d37")
+                p in _lower
+                for p in (
+                    # English explicit phrases
+                    "speak in", "switch to", "change to", "change language",
+                    "in english", "in hindi", "in tamil", "in telugu", "in kannada",
+                    "in malayalam", "in bengali", "in marathi", "in gujarati",
+                    "in punjabi", "in odia", "in bangla",
+                    # Hindi / Hinglish
+                    "mein bolo", "mein bol", "mein baat", "mein boliye",
+                    "mein bolna", "bhasha badlo", "bhasha change",
+                    "\u092d\u093e\u0937\u093e \u092c\u0926\u0932", "\u092d\u093e\u0937\u093e \u092c\u0926\u0932\u094b",
+                    "\u092e\u0947\u0902 \u092c\u094b\u0932\u094b", "\u092e\u0947\u0902 \u092c\u093e\u0924",
+                    # Other scripts — "language" / "switch" equivalents
+                    "\u092d\u093e\u0937\u093e", "\u09ad\u09be\u09b7\u09be",
+                    "\u0bae\u0bca\u0bb4\u0bbf \u0bae\u0bbe\u0bb1\u0bc1",
+                    "\u0c2d\u0c3e\u0c37 \u0c2e\u0c3e\u0c30\u0c4d\u0c1a\u0c41",
+                    "\u0cad\u0cbe\u0cb7\u0cc6 \u0cac\u0ca6\u0cb2\u0cbf",
+                    "\u0d2d\u0d3e\u0d37 \u0d2e\u0d3e\u0d31\u0d4d\u0d31\u0d41\u0d15",
+                )
             )
-            if len(words) <= 4 or is_explicit_switch:
+            if is_explicit_switch:
                 self._apply_language(switch_lang)
                 ack = _LANGUAGE_ACK[switch_lang]
                 logger.info(f"[{self.session_id}] Mid-call language switch → {switch_lang}")
