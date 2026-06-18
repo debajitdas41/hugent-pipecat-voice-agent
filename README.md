@@ -70,7 +70,7 @@ pipecat-voice-agent/
 │   ├── audio_output.py       # AudioRawFrame → WebSocket bytes
 │   ├── booking_processor.py  # Business logic bridge (non-blocking)
 │   ├── assistant_capture.py  # Barge-in / interruption handling
-│   └── sarvam_m_llm.py       # sarvam-m LLM processor (custom)
+│   └── sarvam_llm.py         # sarvam-30b LLM processor (custom)
 │
 ├── prompts/                  # System prompts — 11 languages
 │   ├── loader.py
@@ -219,7 +219,7 @@ TTS_SPEAKER=priya
 TTS_TARGET_LANGUAGE=en-IN
 
 # LLM
-LLM_MODEL=sarvam-m
+LLM_MODEL=sarvam-30b
 LLM_TIMEOUT_MS=12000
 
 DEFAULT_TIMEZONE=Asia/Kolkata
@@ -297,7 +297,7 @@ Browser (mic + speaker)
    │       ↓                                       │
    │  BookingProcessor  ←──── HTTP ──→ Backend API │
    │       ↓                          (port 8000)  │
-   │  SarvamMLLMProcessor (sarvam-m)               │
+   │  SarvamLLMProcessor (sarvam-30b)               │
    │       ↓                                       │
    │  SarvamTTSService  (bulbul:v3)                │
    │       ↓                                       │
@@ -349,7 +349,7 @@ Set `STT_LANGUAGE=unknown` to let Sarvam auto-detect the caller's language on ev
 
 | Model | Speed | Use case |
 |-------|-------|---------|
-| `sarvam-m` ✅ | Fastest | Real-time voice conversation |
+| `sarvam-30b` ✅ | Fast | Real-time voice conversation |
 | `sarvam-30b` | Medium | Higher quality responses |
 | `sarvam-105b` | Slow | Best quality |
 

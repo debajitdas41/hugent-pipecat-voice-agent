@@ -1,6 +1,6 @@
 """Sarvam AI LLM — raw HTTP to Sarvam Chat Completions API
 
-Uses sarvam-m by default. reasoning_effort=null (JSON null) disables
+Uses sarvam-30b by default. reasoning_effort=null (JSON null) disables
 reasoning/thinking mode for fast, low-latency responses.
 """
 import os
@@ -33,7 +33,7 @@ _MODEL = None
 def _model() -> str:
     global _MODEL
     if _MODEL is None:
-        _MODEL = os.getenv("LLM_MODEL", "sarvam-m")
+        _MODEL = os.getenv("LLM_MODEL", "sarvam-30b")
         logger.info(f"[LLM] Using model: {_MODEL}")
     return _MODEL
 
@@ -155,7 +155,7 @@ async def generate_response(
             messages=messages,
             temperature=temp,
             max_tokens=1000,
-            reasoning_effort=None,   # null = non-think mode for sarvam-m
+            reasoning_effort=None,   # null = non-think mode for sarvam-30b
         )
         content, reasoning, finish, usage = _parse(data)
         content = _strip_think_tags(content)
@@ -207,7 +207,7 @@ async def generate_response_streaming(
     a dict as the first item: {"__extraction__": {fields...}}
     Then yields normal text tokens for TTS.
     
-    sarvam-m: reasoning_effort=null disables thinking mode for fast responses.
+    sarvam-30b: reasoning_effort=null disables thinking mode for fast responses.
     Any reasoning_content deltas are silently skipped (safety net).
     """
     # Add extraction instructions if enabled
@@ -247,7 +247,7 @@ Now output:
         "temperature": 0.3,
         "max_tokens": 200,         # voice: 1-2 sentences; caps budget for lower TTFT
         "stream": True,
-        "reasoning_effort": None,  # JSON null → disable think mode on sarvam-m
+        "reasoning_effort": None,  # JSON null → disable think mode on sarvam-30b
     }
     headers = {
         "Content-Type": "application/json",
@@ -383,7 +383,7 @@ async def extract_json(
     user_prompt: str,
     timeout_s: float = 4.0,
 ) -> dict:
-    """Call sarvam-m with reasoning DISABLED (null) for fast JSON extraction."""
+    """Call sarvam-30b with reasoning DISABLED (null) for fast JSON extraction."""
     messages = [
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": user_prompt},

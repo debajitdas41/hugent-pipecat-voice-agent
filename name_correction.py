@@ -1,5 +1,5 @@
 """
-Indian Name Correction Service — sarvam-m
+Indian Name Correction Service — sarvam-30b
 Same prompt as V2, backed by llm.extract_json() instead of Gemini.
 """
 import logging
@@ -96,7 +96,7 @@ async def correct_indian_name(
     timeout: float = 2.0,
 ) -> Tuple[str, ConfidenceLevel, str]:
     """
-    Correct STT transcription errors in Indian names using sarvam-m.
+    Correct STT transcription errors in Indian names using sarvam-30b.
 
     Args:
         transcribed_name: Name from STT (may have errors)

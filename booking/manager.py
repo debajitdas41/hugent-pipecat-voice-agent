@@ -20,14 +20,17 @@ from dataclasses import dataclass, field
 from zoneinfo import ZoneInfo
 from difflib import SequenceMatcher
 
-from extraction import extract_booking_info
-from backend_client import BackendClient
-from name_correction import correct_indian_name
-from context import build_booking_context
+from services.extraction import extract_booking_info
+from services.backend_client import BackendClient
+from services.name_correction import correct_indian_name
+from services.context import build_booking_context  # kept for reference / rollback
+from services.smart_context import build_smart_context as build_booking_context  # noqa: F811 — active implementation
 
 logger = logging.getLogger("booking")
 
-FIELD_ORDER = ["name", "age", "department", "date", "time"]
+FIELD_ORDER = ["name", "department", "date", "time", "reason"]
+# Optional fields — collected opportunistically if offered; never asked explicitly
+OPTIONAL_FIELDS = ["doctor", "age"]
 
 
 # ──────────────────────────────────────────────────────────────
@@ -150,14 +153,14 @@ _DEPT_MAP: dict[str, str] = {
     "स्क्रीन": "ENT",  # common STT mishearing of श्रवण/सुनना for ENT problems
     # Bengali
     "সাধারণ": "General", "জেনারেল": "General", "সাধারণ চিকিৎসা": "General",
-    "দাঁত": "Dental", "ডেন্টাল": "Dental",
+    "দাঁত": "Dental", "ডেন্টাল": "Dental", "দন্ত": "Dental",
     "চর্ম": "Dermatology", "ডার্মাটোলজি": "Dermatology", "চামড়া": "Dermatology",
-    "অর্থোপেডিক": "Orthopedic", "হাড়": "Orthopedic",
-    "শিশু": "Pediatric", "শিশুরোগ": "Pediatric",
-    "বুক": "Chest", "ফুসফুস": "Chest",
+    "অর্থোপেডিক": "Orthopedic", "অর্থো": "Orthopedic", "অর্থ": "Orthopedic", "হাড়": "Orthopedic", "জয়েন্ট": "Orthopedic",
+    "শিশু": "Pediatric", "শিশুরোগ": "Pediatric", "বাচ্চা": "Pediatric",
+    "বুক": "Chest", "ফুসফুস": "Chest", "শ্বাস": "Chest",
     "হৃদয়": "Cardiology", "হার্ট": "Cardiology",
     "চোখ": "Ophthalmology", "চক্ষু": "Ophthalmology",
-    "কান নাক গলা": "ENT",
+    "কান নাক গলা": "ENT", "কান": "ENT", "নাক": "ENT", "গলা": "ENT",
     # Tamil
     "பொது": "General", "பல்": "Dental", "தோல்": "Dermatology",
     "எலும்பு": "Orthopedic", "குழந்தை": "Pediatric", "மார்பு": "Chest",
@@ -201,6 +204,32 @@ def _normalize_department(value: Optional[str]) -> Optional[str]:
     # Return title-cased original if nothing matched (best effort)
     return stripped.title()
 
+
+# ── Relationship words: never valid as a patient name ─────────────────────────
+# When extraction returns one of these, the system must ask for the actual name.
+_RELATIONSHIP_WORDS: frozenset[str] = frozenset({
+    # English
+    "mother", "mom", "mum", "mama", "father", "dad", "papa",
+    "wife", "husband", "spouse", "brother", "sister", "son", "daughter",
+    "aunt", "uncle", "grandmother", "grandfather", "grandma", "grandpa",
+    "friend", "relative", "patient",
+    # Hindi
+    "माँ", "मां", "मा", "माता", "पिता", "पापा", "बाबा", "पत्नी", "पति",
+    "भाई", "बहन", "बेटा", "बेटी", "दादी", "दादा", "नानी", "नाना",
+    # Bengali
+    "মা", "মাম", "বাবা", "স্ত্রী", "স্বামী", "ভাই", "বোন",
+    "ছেলে", "মেয়ে", "দাদা", "দিদি", "মায়ের",
+    # Tamil
+    "அம்மா", "அப்பா", "மனைவி", "கணவன்",
+    # Telugu
+    "అమ్మ", "నాన్న", "భార్య", "భర్త",
+    # Kannada
+    "ಅಮ್ಮ", "ಅಪ್ಪ", "ಹೆಂಡತಿ", "ಗಂಡ",
+    # Malayalam
+    "അമ്മ", "അച്ഛൻ", "ഭാര്യ", "ഭർത്താവ്",
+    # Marathi
+    "आई",
+})
 
 # Build reverse map: canonical category → all synonym keywords.
 # Used to fuzzy-match a canonical name against a clinic's actual dept list.
@@ -474,6 +503,14 @@ class BookingSession:
     language: str = "en"
     confirmation_presented_to_llm: bool = False  # True after one guard pass; prevents filler/noise from triggering booking
     booking_complete: bool = False  # True after successful _reserve; locks session against re-booking
+    # Post-booking contact confirmation
+    awaiting_contact_confirmation: bool = False
+    awaiting_channel_selection: bool = False
+    contact_number: Optional[str] = None
+    preferred_channel: Optional[str] = None  # "whatsapp"|"sms"|"email"|"voice"
+    email_address: Optional[str] = None
+    # Failure tracking for human transfer trigger
+    reserve_fail_count: int = 0
 
 
 # ──────────────────────────────────────────────────────────────
@@ -558,6 +595,11 @@ class VoiceBookingManager:
                         s.draft[f] = matched
                 else:
                     s.draft[f] = val
+        # Optional fields — accumulate opportunistically
+        for f in OPTIONAL_FIELDS:
+            val = _normalize(extraction.get(f))
+            if val:
+                s.draft[f] = val
 
     async def process_turn(
         self,
@@ -579,8 +621,14 @@ class VoiceBookingManager:
         # ✅ CRITICAL: Log entry state for debugging
         s = self._session(session_id, clinic_id, phone)
 
-        # ── Guard: booking already done — return immediately, prevent re-booking ──
+        # ── Guard: booking already done ───────────────────────────────────────
         if s.booking_complete:
+            # Post-booking: handle contact confirmation and channel selection
+            if s.awaiting_contact_confirmation or s.awaiting_channel_selection:
+                if s.awaiting_contact_confirmation:
+                    return await self._handle_contact_confirmation(s, extraction, lang=lang)
+                return await self._handle_channel_selection(s, extraction, lang=lang)
+            # All post-booking done — return confirmed context and end call
             logger.info(f"[process_turn] booking_complete=True — returning Booking Confirmed, skipping processing")
             ctx = build_booking_context(s.draft, [], booking_result={"success": True}, lang=lang)
             return {"context": ctx, "end_call": True, "action": None}
@@ -588,7 +636,16 @@ class VoiceBookingManager:
         logger.info(f"[process_turn ENTRY] session_id={session_id}, manager_id={id(self)}, session_obj_id={id(s)}")
         logger.info(f"[process_turn ENTRY] user_text='{user_text[:50]}', extraction={extraction}")
         logger.info(f"[process_turn ENTRY] draft BEFORE update: {s.draft}, name_confirmed={s.name_confirmed}, age_confirmed={s.age_confirmed}")
-        
+
+        # ── Human transfer detection ──────────────────────────────────────────
+        if self._detect_transfer_need(user_text, s):
+            ctx = (
+                "[Transfer to Human]\n"
+                "IMMEDIATELY say: 'I'll connect you with our receptionist. Please stay on the line.' "
+                "Do not offer anything else. End the call gracefully after this sentence."
+            )
+            return {"context": ctx, "end_call": True, "action": "transfer"}
+
         s.language = lang
         tz = os.getenv("DEFAULT_TIMEZONE", "UTC")
         now = datetime.now(ZoneInfo(tz))
@@ -607,13 +664,15 @@ class VoiceBookingManager:
             or s.awaiting_age_confirmation  # ✅ ADDED: Stay in flow during age confirmation
             or s.awaiting_reschedule_confirm
             or s.awaiting_time_clarification
+            or s.awaiting_contact_confirmation
+            or s.awaiting_channel_selection
         )
 
         # ✅ FIX: Field-based entry — if extraction returned ANY booking field,
         # enter the flow immediately. This prevents draft reset when user provides
         # name/age/etc without saying "appointment" keyword.
         if not in_flow:
-            has_booking_field = any(extraction.get(f) for f in ["name", "age", "department", "date", "time"])
+            has_booking_field = any(extraction.get(f) for f in ["name", "age", "department", "date", "time", "reason", "doctor"])
             if has_booking_field:
                 s.booking_started = True
                 in_flow = True
@@ -758,15 +817,70 @@ class VoiceBookingManager:
                         logger.info(f"[Department update] Setting draft['department'] = '{matched}'")
                         s.draft[f] = matched
                 else:
-                    s.draft[f] = val
-                    logger.info(f"[Draft update] SET draft['{f}'] = '{val}'")
+                    # Issue 5 fix: reject relationship words stored as patient name.
+                    if f == "name" and (val in _RELATIONSHIP_WORDS or val.lower() in _RELATIONSHIP_WORDS):
+                        logger.info(
+                            f"[Draft update] Rejected relationship word as name: '{val}' — "
+                            "system will ask for patient's actual name"
+                        )
+                    # Issue 10 fix: never overwrite a confirmed name or confirmed age.
+                    # Once the caller confirms "yes, that's my name/age", that value is locked.
+                    # Subsequent STT extractions may re-produce the uncorrected form (e.g.
+                    # "Debjit Dash" after correction to "Debjit Das") — silently ignore them.
+                    elif f == "name" and s.name_confirmed:
+                        logger.info(
+                            f"[Draft update] Skipping name '{val}' — name already confirmed "
+                            f"as '{s.draft.get('name')}'"
+                        )
+                    elif f == "age" and s.age_confirmed:
+                        logger.info(
+                            f"[Draft update] Skipping age '{val}' — age already confirmed "
+                            f"as '{s.draft.get('age')}'"
+                        )
+                    else:
+                        s.draft[f] = val
+                        logger.info(f"[Draft update] SET draft['{f}'] = '{val}'")
 
         logger.info(f"[Draft update] AFTER loop: draft={s.draft}")
+
+        # ── Optional fields: accumulate doctor + age opportunistically ─────────
+        # Doctor: store if mentioned; never ask for it
+        _doctor_val = _normalize(extraction.get("doctor"))
+        if _doctor_val and not s.draft.get("doctor"):
+            s.draft["doctor"] = _doctor_val
+            logger.info(f"[Draft update] Optional doctor stored: '{_doctor_val}'")
+        # Age: store if mentioned; confirmation flow handles it downstream
+        _age_val = _normalize(extraction.get("age"))
+        if _age_val and not s.age_confirmed:
+            # Reject if age already confirmed
+            s.draft["age"] = _age_val
+            logger.info(f"[Draft update] Optional age stored: '{_age_val}'")
 
         # If the extracted department wasn't available at this clinic, return now
         # (after the full loop so date/time from the same utterance were captured)
         if dept_unavailable_ctx is not None:
             return {"context": dept_unavailable_ctx, "end_call": False, "action": None}
+
+        # ── Smart fallback: extract department from raw user_text if extraction missed it ──
+        # Issue 7 fix: sarvam-30b sometimes returns null for short/phonetic department words
+        # (e.g. "অর্থ" for Ortho, "dental" as a standalone word).
+        # Issue 8 fix: ONLY use EXACT/case-insensitive direct dict lookup on the FULL user text.
+        # NO partial matching (e.g. "ent" inside "appointment") and no multi-word sentences.
+        # This prevents sentences like "I want to book for tomorrow" from spuriously
+        # matching partial substrings like "ent" (in "appointment") → ENT.
+        if not s.draft.get("department") and s.booking_started:
+            _user_stripped = user_text.strip()
+            _user_key = _user_stripped.lower()
+            # Direct lookup only — not _normalize_department which does partial scanning
+            _dept_direct = _DEPT_MAP.get(_user_key) or _DEPT_MAP.get(_user_stripped)
+            if _dept_direct:
+                _dept_matched = _match_to_clinic_departments(_dept_direct, clinic_depts)
+                if not clinic_depts or _dept_matched in clinic_depts:
+                    logger.info(
+                        f"[Dept fallback] Direct match: '{_user_stripped}' → '{_dept_matched}' "
+                        f"(extraction missed it)"
+                    )
+                    s.draft["department"] = _dept_matched
 
         # ── Name correction (if new name and not yet confirmed) ──
         if s.draft.get("name") and not s.name_confirmed and not s.awaiting_name_confirmation:
@@ -881,14 +995,35 @@ class VoiceBookingManager:
         if s.awaiting_age_confirmation:
             logger.info(f"[Age confirmation] awaiting_age_confirmation=True, processing user response")
             confirm = extraction.get("confirm")
-            has_other = any(extraction.get(f) for f in ["date", "time", "department"])
-            logger.info(f"[Age confirmation] confirm={confirm}, has_other={has_other}, extraction={extraction}")
-            if has_other or confirm is True:
-                logger.info(f"[Age confirmation] Accepting age (has_other={has_other} or confirm={confirm})")
+            # NOTE: has_other intentionally NOT used here. Unlike name confirmation,
+            # age must be confirmed explicitly — accepting it because the user also
+            # mentioned a date/time bypasses the confirmation and records wrong ages.
+            logger.info(f"[Age confirmation] confirm={confirm}, extraction={extraction}")
+            if confirm is True:
+                logger.info(f"[Age confirmation] Accepting age — explicit confirm=True")
                 s.awaiting_age_confirmation = False
                 s.age_confirmed = True
             elif confirm is False:
-                logger.info("[Age confirmation] User rejected age, clearing and asking again")
+                # Issue 6 fix: only clear age on a PURE rejection.
+                # If the user provided OTHER booking fields (department/date/time) in the
+                # same utterance, extraction is hallucinating confirm=False for an unrelated
+                # response (e.g. user said "Ortho" → extraction returned confirm=false).
+                # In that case, keep the age and stay in age confirmation.
+                _has_other_fields = any(extraction.get(f) for f in ["department", "date", "time"])
+                if _has_other_fields:
+                    logger.warning(
+                        f"[Age confirmation] confirm=False but other fields also extracted "
+                        f"({[f for f in ['department','date','time'] if extraction.get(f)]}) — "
+                        "treating as unrelated response, keeping age and re-asking"
+                    )
+                    ctx = build_booking_context(
+                        s.draft, _missing_fields(s.draft),
+                        age_to_confirm=s.draft.get("age"),
+                        clinic_departments=clinic_depts,
+                        lang=lang,
+                    )
+                    return {"context": ctx, "end_call": False, "action": None}
+                logger.info("[Age confirmation] User explicitly rejected age — clearing and asking again")
                 s.awaiting_age_confirmation = False
                 s.age_confirmed = False
                 s.draft["age"] = None
@@ -986,9 +1121,11 @@ class VoiceBookingManager:
                     result = await self._reserve(s)
                     if result.get("success"):
                         s.booking_complete = True
-                        logger.info("[_reserve] Success — set booking_complete=True to prevent re-booking")
+                        s.awaiting_contact_confirmation = True
+                        s.contact_number = s.phone  # pre-fill with caller's number
+                        logger.info("[_reserve] Success — set booking_complete=True, starting contact confirmation")
                     ctx = build_booking_context(s.draft, [], booking_result=result, lang=lang)
-                    end_call = result.get("success", False)
+                    end_call = False  # stay on call for contact confirmation
                     return {"context": ctx, "end_call": end_call, "action": None}
                 elif confirm is False:
                     s.awaiting_confirmation = False
@@ -1041,7 +1178,7 @@ class VoiceBookingManager:
                     lang=lang,
                 )
                 return {"context": ctx, "end_call": False, "action": None}
-            
+
             # Check slot availability before asking confirmation
             slot_check = await self._check_slot(s)
             if slot_check.get("available"):
@@ -1057,14 +1194,33 @@ class VoiceBookingManager:
                     extraction.get(f) for f in FIELD_ORDER
                 )
                 if is_pure_confirm:
+                    # Hard safety check — must re-validate missing fields even on the
+                    # shortcut path (age_confirmed guard above should have caught it,
+                    # but be defensive).
+                    _pure_confirm_missing = _missing_fields(s.draft)
+                    if _pure_confirm_missing:
+                        logger.error(
+                            f"[Slot-check gate] is_pure_confirm but missing fields: "
+                            f"{_pure_confirm_missing} — blocking booking"
+                        )
+                        s.awaiting_confirmation = False
+                        ctx = build_booking_context(
+                            s.draft, _pure_confirm_missing,
+                            validation_failed=True,
+                            clinic_departments=clinic_depts,
+                            lang=lang,
+                        )
+                        return {"context": ctx, "end_call": False, "action": None}
                     logger.info("[Slot-check gate] pure confirm=True (no new fields) — booking immediately without re-confirming")
                     s.awaiting_confirmation = True  # set so _reserve / context look right
                     result = await self._reserve(s)
                     if result.get("success"):
                         s.booking_complete = True
-                        logger.info("[_reserve] Success — set booking_complete=True to prevent re-booking")
+                        s.awaiting_contact_confirmation = True
+                        s.contact_number = s.phone  # pre-fill with caller's number
+                        logger.info("[_reserve] Success — set booking_complete=True, starting contact confirmation")
                     ctx = build_booking_context(s.draft, [], booking_result=result, lang=lang)
-                    end_call = result.get("success", False)
+                    end_call = False  # stay on call for contact confirmation
                     return {"context": ctx, "end_call": end_call, "action": None}
 
                 s.awaiting_confirmation = True
@@ -1161,6 +1317,132 @@ class VoiceBookingManager:
         return {"context": ctx, "end_call": False, "action": None}
 
     # ──────────────────────────────────────────────────────────
+    #  Post-booking contact confirmation handlers
+    # ──────────────────────────────────────────────────────────
+    async def _handle_contact_confirmation(self, s: "BookingSession", extraction: dict, lang: str = "en") -> dict:
+        """Handle post-booking contact number confirmation turn."""
+        contact_num = _normalize(extraction.get("contact_number"))
+        confirm = extraction.get("confirm")
+        user_text_lower = (extraction.get("_user_text", "") or "").lower()
+
+        # "same"/"this number"/"yes" → use caller's own number
+        if confirm is True or any(w in user_text_lower for w in ["same", "this number", "this", "haan", "yes"]):
+            s.contact_number = s.phone
+            s.awaiting_contact_confirmation = False
+            s.awaiting_channel_selection = True
+            logger.info(f"[Contact confirmation] Using caller's own number: {s.phone}")
+        elif contact_num:
+            s.contact_number = contact_num
+            s.awaiting_contact_confirmation = False
+            s.awaiting_channel_selection = True
+            logger.info(f"[Contact confirmation] Using alternate number: {contact_num}")
+        else:
+            # Still waiting — return context to ask again
+            ctx = build_booking_context(
+                s.draft, [],
+                awaiting_contact_confirmation=True,
+                caller_phone=s.phone,
+                lang=lang,
+            )
+            return {"context": ctx, "end_call": False, "action": None}
+
+        ctx = build_booking_context(
+            s.draft, [],
+            awaiting_channel_selection=True,
+            contact_number=s.contact_number,
+            lang=lang,
+        )
+        return {"context": ctx, "end_call": False, "action": None}
+
+    async def _handle_channel_selection(self, s: "BookingSession", extraction: dict, lang: str = "en") -> dict:
+        """Handle post-booking communication channel selection turn."""
+        channel = _normalize(extraction.get("preferred_channel"))
+        email = _normalize(extraction.get("email_address"))
+        user_text_lower = (extraction.get("_user_text", "") or "").lower()
+
+        # Detect channel from user text if extraction missed it
+        if not channel:
+            if any(w in user_text_lower for w in ["whatsapp", "what's app", "wa"]):
+                channel = "whatsapp"
+            elif any(w in user_text_lower for w in ["sms", "text", "message", "msg"]):
+                channel = "sms"
+            elif any(w in user_text_lower for w in ["email", "mail", "e-mail"]):
+                channel = "email"
+            elif any(w in user_text_lower for w in ["call", "voice", "phone", "ring"]):
+                channel = "voice"
+
+        if channel:
+            s.preferred_channel = channel
+            if channel == "email" and not email and not s.email_address:
+                # Need email address — stay in channel selection sub-state
+                ctx = build_booking_context(
+                    s.draft, [],
+                    awaiting_email=True,
+                    contact_number=s.contact_number,
+                    lang=lang,
+                )
+                return {"context": ctx, "end_call": False, "action": None}
+            if email:
+                s.email_address = email
+            s.awaiting_channel_selection = False
+            logger.info(f"[Channel selection] Channel={channel}, contact={s.contact_number}, email={s.email_address}")
+            ctx = build_booking_context(
+                s.draft, [],
+                contact_confirmed=True,
+                contact_number=s.contact_number,
+                preferred_channel=channel,
+                email_address=s.email_address,
+                lang=lang,
+            )
+            return {"context": ctx, "end_call": True, "action": None}
+
+        # Still waiting — return context to ask again
+        ctx = build_booking_context(
+            s.draft, [],
+            awaiting_channel_selection=True,
+            contact_number=s.contact_number,
+            lang=lang,
+        )
+        return {"context": ctx, "end_call": False, "action": None}
+
+    # ──────────────────────────────────────────────────────────
+    #  Human transfer detection
+    # ──────────────────────────────────────────────────────────
+    def _detect_transfer_need(self, user_text: str, s: "BookingSession") -> bool:
+        """Return True if the call should be transferred to a human agent."""
+        text_lower = user_text.lower()
+        # Medical emergency keywords
+        emergency_keywords = [
+            "emergency", "chest pain", "heart attack", "ambulance", "critical",
+            "unconscious", "bleeding", "can't breathe", "cannot breathe", "stroke",
+            # Hindi
+            "आपातकाल", "इमर्जेंसी", "एम्बुलेंस",
+            # Bengali
+            "জরুরি", "অ্যাম্বুলেন্স",
+        ]
+        if any(kw in text_lower for kw in emergency_keywords):
+            logger.info(f"[Transfer] Emergency keyword detected: '{user_text[:60]}'")
+            return True
+        # Frustration / explicit human request
+        frustration_keywords = [
+            "real person", "human", "agent", "manager", "supervisor", "speak to someone",
+            "talk to someone", "useless", "not working", "waste of time", "transfer me",
+            "connect me", "helpless", "frustrated", "annoying",
+            # Hindi
+            "इंसान से बात", "असली इंसान", "मैनेजर",
+            # Bengali
+            "মানুষের সাথে কথা", "ম্যানেজার",
+        ]
+        if any(kw in text_lower for kw in frustration_keywords):
+            logger.info(f"[Transfer] Frustration/human-request keyword detected: '{user_text[:60]}'")
+            return True
+        # Repeated booking failures
+        if s.reserve_fail_count >= 2:
+            logger.info(f"[Transfer] reserve_fail_count={s.reserve_fail_count} >= 2 — triggering transfer")
+            return True
+        return False
+
+    # ──────────────────────────────────────────────────────────
     #  Backend API helpers
     # ──────────────────────────────────────────────────────────
     async def _get_clinic_departments(self, clinic_id: str) -> list[str]:
@@ -1238,12 +1520,13 @@ class VoiceBookingManager:
 
     async def _reserve(self, s: BookingSession) -> dict:
         """Reserve the appointment via Backend_saas."""
-        # ✅ CRITICAL: Final validation before booking - log all fields
+        # CRITICAL: Final hard gate — refuse to book if ANY required field is missing.
         logger.info(f"[_reserve] FINAL VALIDATION - Draft before booking: {s.draft}")
         missing = _missing_fields(s.draft)
         if missing:
-            logger.error(f"[_reserve] CRITICAL ERROR: Missing fields at booking: {missing}")
-            return {"error": f"Cannot book - missing fields: {missing}"}
+            logger.error(f"[_reserve] BLOCKED — missing fields: {missing}")
+            s.reserve_fail_count += 1
+            return {"error": f"Cannot book - missing required fields: {missing}"}
         
         try:
             # Ensure user exists
@@ -1266,7 +1549,6 @@ class VoiceBookingManager:
                     f"{date_str} {current_year} {time_str}", "%d %b %Y %I:%M %p"
                 ).replace(tzinfo=ZoneInfo(tz))
                 # If the parsed date is in the past, assume next year
-                # (e.g. patient books "5 Jan" in December)
                 if apt_dt < now_tz:
                     apt_dt = apt_dt.replace(year=current_year + 1)
                 appointment_at = apt_dt.isoformat()
@@ -1288,6 +1570,10 @@ class VoiceBookingManager:
                 # Department in draft is already clinic-matched from process_turn;
                 # re-normalize only as a safety net (no extra API call needed).
                 payload["department"] = s.draft["department"]
+            if s.draft.get("doctor"):
+                payload["doctor"] = s.draft["doctor"]
+            if s.draft.get("reason"):
+                payload["reason"] = s.draft["reason"]
             if appointment_at:
                 payload["appointment_at"] = appointment_at
 
@@ -1300,6 +1586,7 @@ class VoiceBookingManager:
                 return {"success": True, "appointment": response.json()}
             elif response.status_code == 409:
                 logger.warning("Slot full at reservation time")
+                s.reserve_fail_count += 1
                 try:
                     all_slots = await self.backend.available_slots(s.clinic_id, s.draft["date"])
                     times = all_slots.get("available_times", [])
@@ -1310,8 +1597,10 @@ class VoiceBookingManager:
                 return {"slot_full": True, "available_times": times, "nearest_time": nearest}
             else:
                 logger.error(f"Reserve failed: {response.status_code} {response.text}")
+                s.reserve_fail_count += 1
                 return {"error": f"HTTP {response.status_code}: {response.text[:200]}"}
 
         except Exception as e:
             logger.error(f"Reservation error: {e}")
+            s.reserve_fail_count += 1
             return {"error": str(e)}

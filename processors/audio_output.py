@@ -24,18 +24,32 @@ class AudioOutputProcessor(FrameProcessor):
     def __init__(self, on_audio_chunk: Callable[[bytes, bool], Awaitable[None]]):
         super().__init__()
         self.on_audio_chunk = on_audio_chunk
+        self._tts_chunk_count = 0
+        self._tts_total_bytes = 0
 
     async def process_frame(self, frame: Frame, direction: FrameDirection):
         await super().process_frame(frame, direction)
         if isinstance(frame, TTSAudioRawFrame):
             try:
-                await self.on_audio_chunk(bytes(frame.audio))
+                chunk = bytes(frame.audio)
+                self._tts_chunk_count += 1
+                self._tts_total_bytes += len(chunk)
+                logger.debug(
+                    f"[audio_out] TTS chunk #{self._tts_chunk_count}: "
+                    f"{len(chunk)}B (total so far: {self._tts_total_bytes}B)"
+                )
+                await self.on_audio_chunk(chunk)
             except Exception as e:
                 logger.error(f"Error sending audio to WebSocket: {e}")
         elif isinstance(frame, TTSStoppedFrame):
             try:
-                await self.on_audio_chunk(end_of_tts=True)
-                logger.debug("TTS stream ended — end_of_tts flushed")
+                logger.info(
+                    f"[audio_out] TTSStoppedFrame — flushing tail. "
+                    f"Total: {self._tts_chunk_count} chunks, {self._tts_total_bytes}B"
+                )
+                self._tts_chunk_count = 0
+                self._tts_total_bytes = 0
+                await self.on_audio_chunk(b"", end_of_tts=True)
             except Exception as e:
                 logger.error(f"Error sending end-of-TTS signal: {e}")
         else:

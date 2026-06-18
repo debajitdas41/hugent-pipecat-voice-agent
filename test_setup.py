@@ -77,7 +77,7 @@ try:
     tts_model = os.getenv("TTS_MODEL", "bulbul:v3")
     tts_speaker = os.getenv("TTS_SPEAKER", "priya")
     tts_language = os.getenv("TTS_TARGET_LANGUAGE", "en-IN")
-    llm_model = os.getenv("LLM_MODEL", "sarvam-m")
+    llm_model = os.getenv("LLM_MODEL", "sarvam-30b")
     
     print(f"  STT: {stt_model} (lang: {stt_language})")
     print(f"  TTS: {tts_model} / {tts_speaker} (lang: {tts_language})")

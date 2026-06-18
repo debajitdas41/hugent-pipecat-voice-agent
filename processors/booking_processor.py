@@ -13,7 +13,10 @@ Key architecture decisions (v2 → pipecat latency fix):
 import asyncio
 import base64
 import logging
+import os
 import re
+from datetime import datetime
+from zoneinfo import ZoneInfo
 from typing import Awaitable, Callable, Optional
 
 from pipecat.frames.frames import (
@@ -30,9 +33,9 @@ from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
 
 from sarvamai import AsyncSarvamAI, AudioOutput, EventResponse
 
-from booking_manager import VoiceBookingManager
-from extraction import extract_booking_info
-from prompts.loader import get_system_prompt
+from booking.manager import VoiceBookingManager
+from services.extraction import extract_booking_info
+from prompts.loader import get_system_prompt, get_smart_prompt
 
 # Sarvam TTS language codes (same as v2's SUPPORTED_LANGUAGES)
 _SARVAM_LANG_MAP: dict[str, str] = {
@@ -90,12 +93,20 @@ _LANG_TO_PIPECAT: dict[str, Language] = {
     "te": Language.TE_IN,
 }
 
-# ── Language selection constants ────────────────────────────────────────────
-_LANGUAGE_SELECTION_GREETING = (
-    "Hi! Welcome to {clinic_name}! "
-    "Which language would you like to continue in? "
-    "English, \u0939\u093f\u0902\u0926\u0940, \u0c95\u0ca8\u0ccd\u0ccd\u0ca1, \u0ba4\u0bae\u0bbf\u0bb4\u0bcd, \u09ac\u09be\u0982\u09b2\u09be, or any other language."
-)
+# ── Greeting helper ─────────────────────────────────────────────────────────
+def _time_greeting() -> str:
+    """Return Good morning / afternoon / evening based on IST time."""
+    tz_name = os.getenv("DEFAULT_TIMEZONE", "Asia/Kolkata")
+    try:
+        hour = datetime.now(ZoneInfo(tz_name)).hour
+    except Exception:
+        hour = datetime.now(ZoneInfo("Asia/Kolkata")).hour
+    if hour < 12:
+        return "Good morning"
+    elif hour < 17:
+        return "Good afternoon"
+    else:
+        return "Good evening"
 
 _LANGUAGE_KEYWORDS: dict[str, str] = {
     # English names
@@ -160,6 +171,97 @@ _LANGUAGE_REPROMPT: dict[str, str] = {
     "od": "\u0b15\u0b4d\u0b37\u0b2e\u0b3e \u0b15\u0b30\u0b28\u0b4d\u0b24\u0b41, \u0b06\u0b2a\u0b23 \u0b15\u0b47\u0b09\u0b01 \u0b2d\u0b3e\u0b37\u0b3e\u0b30\u0b47 \u0b15\u0b25\u0b3e \u0b39\u0b47\u0b2c\u0b3e\u0b15\u0b41 \u0b1a\u0b3e\u0b39\u0b41\u0b01\u0b1b\u0b28\u0b4d\u0b24\u0b3f? \u0b13\u0b21\u093c\u093f\u0906, English, Hindi, \u0b2c\u0b3e \u0b05\u0b28\u0b4d\u0b2f \u0b15\u0b4c\u0b23\u0b38\u0b3f?",
 }
 
+# ── Language-detection helpers ──────────────────────────────────────────────
+
+_LANG_NAMES: dict[str, str] = {
+    "hi": "Hindi",  "bn": "Bengali", "gu": "Gujarati", "kn": "Kannada",
+    "ml": "Malayalam", "mr": "Marathi", "od": "Odia",  "pa": "Punjabi",
+    "ta": "Tamil",  "te": "Telugu",
+}
+
+# Maps STT-reported language code strings → our internal language codes.
+# Covers both "hi-IN" (Pipecat Language enum .value) and bare "hi" forms.
+_STT_LANG_MAP: dict[str, str] = {
+    "en-in": "en", "en-us": "en", "en-gb": "en", "en": "en",
+    "hi-in": "hi", "hi": "hi",
+    "bn-in": "bn", "bn": "bn",
+    "gu-in": "gu", "gu": "gu",
+    "kn-in": "kn", "kn": "kn",
+    "ml-in": "ml", "ml": "ml",
+    "mr-in": "mr", "mr": "mr",
+    "or-in": "od", "or": "od", "od-in": "od", "od": "od",
+    "pa-in": "pa", "pa": "pa",
+    "ta-in": "ta", "ta": "ta",
+    "te-in": "te", "te": "te",
+}
+
+# Words that mean "yes" across all supported languages.
+_YES_WORDS: frozenset[str] = frozenset({
+    "yes", "yeah", "yep", "sure", "ok", "okay", "correct", "right", "please", "alright",
+    # Hindi / Hinglish
+    "haan", "ha", "han", "bilkul", "theek", "theekhai", "haa", "hnji", "ji", "haan ji",
+    # Tamil
+    "aamam", "aama", "seri",
+    # Telugu
+    "avunu", "aunu", "sare",
+    # Kannada
+    "houdu", "hauda", "sari",
+    # Malayalam
+    "athe", "aathe",
+    # Marathi
+    "ho", "hoy",
+    # Native scripts
+    "हाँ", "हां", "हान", "जी", "बिल्कुल", "ठीक है", "हाँ जी",
+    "হ্যাঁ", "হা",
+    "ஆமாம்", "சரி",
+    "అవును", "సరే",
+    "ಹೌದು", "ಸರಿ",
+    "ആതെ", "ശരി",
+    "हो", "बरोबर",
+    "ਹਾਂ", "ਹਾ",
+})
+
+# Words that mean "no" across all supported languages.
+_NO_WORDS: frozenset[str] = frozenset({
+    "no", "nope", "nah", "not now", "never mind",
+    # Hindi
+    "nahi", "nahin", "nai", "nhin", "na",
+    # Marathi
+    "nako", "nahi",
+    # Tamil
+    "vendam", "vendum",
+    # Telugu
+    "vaddu", "ledu",
+    # Kannada
+    "beda", "illa",
+    # Malayalam
+    "venda", "illa",
+    # Bengali
+    "na",
+    # Native scripts
+    "नहीं", "ना", "नाही", "नको",
+    "না", "না না",
+    "இல்ல", "வேண்டாம்",
+    "వద్దు", "లేదు",
+    "ಬೇಡ", "ಇಲ್ಲ",
+    "വേണ്ട", "ഇല്ല",
+    "ਨਹੀਂ", "ਨਾ",
+})
+
+
+def _parse_stt_lang(frame_language) -> str | None:
+    """Convert a Pipecat Language enum or raw string to our 2-letter lang code.
+    Returns None if not recognised or if English."""
+    if frame_language is None:
+        return None
+    raw = str(frame_language).lower().strip()
+    # Handle "Language.HI_IN" enum repr → extract "hi_in" → "hi-in"
+    if "." in raw:
+        raw = raw.split(".")[-1]
+    raw = raw.replace("_", "-")
+    return _STT_LANG_MAP.get(raw)
+
+
 # ── Incomplete-utterance stitching ──────────────────────────────────────────
 _CONNECTOR_WORDS = {
     "and", "but", "or", "then", "so", "because", "when", "if",
@@ -184,7 +286,7 @@ def _is_likely_incomplete(text: str) -> bool:
 
 logger = logging.getLogger("booking")
 
-_CONTEXT_SEPARATOR = "\n\n---\n\n"
+_CONTEXT_SEPARATOR = "\n\n[BOOKING STATE]\n"
 
 
 class BookingProcessor(FrameProcessor):
@@ -236,10 +338,12 @@ class BookingProcessor(FrameProcessor):
         self.recent_utterances: list[str] = []
 
         # Base system prompt (language-independent starting point)
+        # Use the smart universal prompt — same regardless of language.
+        # (Falls back to LLM context content if already pre-loaded in pipeline_worker.)
         self._base_prompt: str = (
             llm_context.messages[0]["content"]
             if llm_context.messages
-            else get_system_prompt("en")
+            else get_smart_prompt(caller_phone=phone)
         )
 
         # Context string from PREVIOUS turn's extraction result.
@@ -247,13 +351,15 @@ class BookingProcessor(FrameProcessor):
         # Updated in background after each turn.
         # Bootstrap value ensures the LLM always has transition guidance even on
         # the very first turn (before any process_turn() has run).
+        # Initial context: simple nudge for the first turn only.
+        # Subsequent turns use smart_context.build_smart_context() output.
+        # NOTE: Do NOT say 'Greet the caller' here — the proactive greeting is already
+        # spoken via direct TTS before the first user turn. Saying it here causes the
+        # LLM to repeat 'Hello!' on Turn 1.
         self._last_booking_context: str = (
-            "[Booking Flow Active]\n"
-            "⚠️ FIELD TRANSITION RULE: Whenever the patient provides any booking field "
-            "(name, age, department, date, or time), acknowledge briefly (2 words max) "
-            "and IMMEDIATELY ask for the next required field in the SAME response. "
-            "NEVER just say 'thank you'/'धन्यवाद'/'শুক্রিয়া' and stop without asking for the next field.\n"
-            "Field order: name → age → department → date → time."
+            "[Ready to Help]\n"
+            "The caller just connected. The opening greeting has already been spoken. "
+            "Do NOT say hello or greet again. Just listen and help with whatever they need."
         )
 
         # Background extraction task (multiple can run concurrently — do NOT cancel on barge-in)
@@ -271,6 +377,11 @@ class BookingProcessor(FrameProcessor):
         self._stitch_task: Optional[asyncio.Task] = None
         self._STITCH_TIMEOUT_SECS: float = float(__import__("os").getenv("STITCH_TIMEOUT_SECS", "1.5"))
 
+        # Monotonic turn counter — each _process_user_text call increments this.
+        # Background tasks capture their seq at spawn; they skip _last_booking_context
+        # writes and proactive pushes when a newer turn has already completed.
+        self._turn_seq: int = 0
+
         # Barge-in: flag to interrupt _speak_direct streaming mid-way
         self._direct_tts_interrupted: bool = False
 
@@ -279,9 +390,14 @@ class BookingProcessor(FrameProcessor):
         self._barge_in_fragment: str = ""
         self._current_transcript: str = ""  # tracks the last transcript pushed downstream
 
-        # Language selection state (Turn 1: greeting, Turn 2: keyword pick)
-        self.awaiting_language_selection: bool = True
+        # Language selection state — disabled; smart prompt handles language naturally
+        self.awaiting_language_selection: bool = False
         self.language_selection_asked: bool = False
+
+        # Mid-call language offer state (auto-detect from STT):
+        # If STT detects user speaking a non-English language, offer to switch once.
+        self._pending_lang_confirm: str | None = None   # lang code being offered
+        self._lang_offer_context: str | None = None     # context block injected into prompt
 
         # Tracks previous awaiting_confirmation value so we can detect the
         # False → True transition and push a proactive confirmation TextFrame.
@@ -349,6 +465,8 @@ class BookingProcessor(FrameProcessor):
         self._direct_tts_interrupted = False
         logger.debug(f"[{self.session_id}] Direct TTS [{language}]: {text[:60]}")
         interrupted = False
+        _direct_chunk_count = 0
+        _direct_total_bytes = 0
         try:
             async with self._tts_client.text_to_speech_streaming.connect(
                 model=self._tts_model,
@@ -372,6 +490,8 @@ class BookingProcessor(FrameProcessor):
                         break
                     if isinstance(msg, AudioOutput):
                         pcm_bytes = base64.b64decode(msg.data.audio)
+                        _direct_chunk_count += 1
+                        _direct_total_bytes += len(pcm_bytes)
                         await self._on_audio_chunk(pcm_bytes)
                     elif isinstance(msg, EventResponse):
                         if (
@@ -383,6 +503,10 @@ class BookingProcessor(FrameProcessor):
         except Exception as e:
             logger.error(f"[{self.session_id}] Direct TTS error: {e}")
         finally:
+            logger.info(
+                f"[{self.session_id}] Direct TTS done: {_direct_chunk_count} chunks, "
+                f"{_direct_total_bytes}B, interrupted={interrupted}"
+            )
             # Always signal end-of-TTS so the pacing buffer flushes its tail.
             # On barge-in the buffer was already cleared; this is a no-op for
             # the pacing buffer but resets any downstream state cleanly.
@@ -403,25 +527,56 @@ class BookingProcessor(FrameProcessor):
                 task.cancel()
         self._transcript_tasks.clear()
 
+    async def _end_call_after_tts(self) -> None:
+        """
+        Gracefully end the call after [Booking Confirmed] TTS has had time to play.
+
+        Why this exists: push_frame() from inside a processor does NOT reset the
+        PipelineTask idle timer. So after the user's last utterance ("yes"), the
+        idle timer counts the entire backend reservation latency + TTS duration.
+        If that exceeds idle_timeout_secs, the pipeline cancels mid-TTS and the
+        caller hears an abrupt hangup.
+
+        Instead: wait for TTS to finish playing (est. based on text length + buffer),
+        then send an end_call control message so FreJun closes the call cleanly.
+        The WebSocket disconnect then propagates an EndFrame through the pipeline.
+        """
+        # Estimate: booking confirmation is ~3-4 sentences (≈12s at normal speech pace).
+        # Add 3s buffer for slow connections / audio buffering.
+        tts_play_duration = float(os.getenv("BOOKING_CONFIRM_TTS_WAIT_SECS", "15"))
+        logger.info(
+            f"[{self.session_id}] Waiting {tts_play_duration}s for confirmation TTS to play "
+            "before ending call"
+        )
+        await asyncio.sleep(tts_play_duration)
+        logger.info(f"[{self.session_id}] Sending end_call to close session gracefully")
+        if self._on_control:
+            try:
+                await self._on_control({"type": "end_call"})
+            except Exception as e:
+                logger.warning(f"[{self.session_id}] end_call control error: {e}")
+
     async def trigger_greeting(self) -> None:
         """
-        Proactively speak the language-selection greeting without waiting for
-        the first user utterance. Called by PipecatWorker shortly after
-        the pipeline starts.
+        Proactively speak the opening greeting without waiting for the first
+        user utterance. Called by PipecatWorker shortly after the pipeline starts.
+        No language selection — the smart prompt handles language naturally.
         """
         if self.language_selection_asked:
-            # Already greeted (e.g. user spoke before the delay elapsed)
             return
         clinic_name = self._clinic_info.get("name", "our clinic")
-        greeting = _LANGUAGE_SELECTION_GREETING.replace("{clinic_name}", clinic_name)
+        greeting = f"{_time_greeting()}! Welcome to {clinic_name}! How may I assist you today?"
         self.language_selection_asked = True
-        logger.info(f"[{self.session_id}] Proactive greeting: '{greeting[:80]}'")
+        logger.info(f"[{self.session_id}] Proactive greeting: '{greeting}'")
         if self._on_control:
             try:
                 await self._on_control({"type": "response", "text": greeting})
             except Exception:
                 pass
         await self._speak_direct(greeting, "en-IN")
+        # Inject the greeting into LLM context as an assistant message so the LLM
+        # knows the opening has already been spoken and won't repeat 'Hello!' on Turn 1.
+        self._llm_context.messages.append({"role": "assistant", "content": greeting})
 
     async def _safe_handle_transcript(self, frame: TranscriptionFrame):
         """Wraps _handle_transcript with error recovery and a per-turn timeout."""
@@ -444,6 +599,19 @@ class BookingProcessor(FrameProcessor):
     async def _handle_transcript(self, frame: TranscriptionFrame):
         user_text = frame.text.strip()
         if not user_text:
+            return
+
+        # ── Noise / background voice gate ─────────────────────────────────────
+        # STT returns language_probability and audio_duration on every transcript.
+        # Very short + low-confidence = background noise, cough, or someone
+        # talking in the background rather than the primary caller.
+        _lang_prob = getattr(frame, "language_probability", None) or 1.0
+        _audio_dur = getattr(frame, "audio_duration", None) or 999.0
+        if _audio_dur < 0.4 and _lang_prob < 0.75:
+            logger.info(
+                f"[{self.session_id}] Noise gate: dropped '{user_text[:60]}' "
+                f"(dur={_audio_dur:.2f}s, prob={_lang_prob:.2f})"
+            )
             return
 
         # ── Utterance stitching: if a pending fragment exists, prepend/replace it ──
@@ -482,71 +650,13 @@ class BookingProcessor(FrameProcessor):
         if len(self.recent_utterances) > 5:
             self.recent_utterances.pop(0)
 
-        # ── Language selection: Turn 1 greeting, Turn 2 keyword pick ──────────
-        # User speaks first — then we either play the greeting (if they didn't
-        # pre-select) or immediately acknowledge their choice.
-        if self.awaiting_language_selection:
-            lang = self._resolve_language_keywords(user_text)
-            if not self.language_selection_asked:
-                # First user utterance — did they already explicitly name a language?
-                # Only keyword match here (NOT STT auto-detect) — we want the
-                # greeting to always play unless the user consciously says "Hindi"
-                # etc. STT seeing "Hello" as en-IN should NOT skip the greeting.
-                if lang:
-                    # Pre-selected (e.g. user said "Hindi" right away)
-                    self._apply_language(lang)
-                    self.awaiting_language_selection = False
-                    self.language_selection_asked = True
-                    ack = _LANGUAGE_ACK[lang]
-                    logger.info(f"[{self.session_id}] Language pre-selected on Turn 1: {lang}")
-                    if self._on_control:
-                        await self._on_control({"type": "response", "text": ack})
-                    await self._speak_direct(ack, _SARVAM_LANG_MAP.get(lang, "en-IN"))
-                else:
-                    # Always play the greeting — wait for Turn 2 to pick language
-                    clinic_name = self._clinic_info.get("name", "our clinic")
-                    greeting = _LANGUAGE_SELECTION_GREETING.replace("{clinic_name}", clinic_name)
-                    self.language_selection_asked = True
-                    logger.info(f"[{self.session_id}] Greeting → '{greeting}'")
-                    if self._on_control:
-                        await self._on_control({"type": "response", "text": greeting})
-                    # Direct TTS: full text in one call (v2 mechanism) — unaffected
-                    # by Pipecat's broadcast_interruption() from VAD speech detection.
-                    await self._speak_direct(greeting, "en-IN")
-                return  # Never send to LLM during language selection
-
-            else:
-                # Turn 2+: user responding to the greeting
-                if not lang:
-                    # No keyword — fall back to STT language_code, then script detection
-                    lang = self._stt_lang_code(frame) or self._detect_language(user_text)
-
-                if lang:
-                    self._apply_language(lang)
-                    self.awaiting_language_selection = False
-                    ack = _LANGUAGE_ACK[lang]
-                    logger.info(f"[{self.session_id}] Language resolved on Turn 2: {lang}")
-                    if self._on_control:
-                        await self._on_control({"type": "response", "text": ack})
-                    await self._speak_direct(ack, _SARVAM_LANG_MAP.get(lang, "en-IN"))
-                else:
-                    # Still unclear — reprompt in the apparent script language
-                    hint = self._detect_language(user_text)
-                    reprompt = _LANGUAGE_REPROMPT.get(hint, _LANGUAGE_REPROMPT["en"])
-                    logger.info(f"[{self.session_id}] Language unclear, reprompting in: {hint}")
-                    if self._on_control:
-                        await self._on_control({"type": "response", "text": reprompt})
-                    await self._speak_direct(reprompt, _SARVAM_LANG_MAP.get(hint, "en-IN"))
-                return  # Never send to LLM during language selection
-
         # ── Mid-call language switch detection ────────────────────────────────
         # Language is LOCKED after the selection phase.
         # A switch is only allowed when the user explicitly asks to change:
         #   "Hindi mein bolo", "speak in Tamil", "switch to Kannada",
-        #   "change language", "Hindi mein baat karo", etc.
+        #   "change language", "mujhe hindi mein baat karni hai", etc.
         # Short utterances that merely contain a language keyword (e.g. a name
         # like "Kannada Raju" or a city name) do NOT trigger a switch.
-        # STT language_code is completely ignored here — see comment below.
         switch_lang = self._resolve_language_keywords(user_text)
         if switch_lang and switch_lang != self.language:
             _lower = user_text.lower()
@@ -555,14 +665,30 @@ class BookingProcessor(FrameProcessor):
                 for p in (
                     # English explicit phrases
                     "speak in", "switch to", "change to", "change language",
+                    "want to speak", "want to talk", "i speak", "let's talk in",
                     "in english", "in hindi", "in tamil", "in telugu", "in kannada",
                     "in malayalam", "in bengali", "in marathi", "in gujarati",
                     "in punjabi", "in odia", "in bangla",
-                    # Hindi / Hinglish
+                    # Hindi / Hinglish — "I want to speak in X"
                     "mein bolo", "mein bol", "mein baat", "mein boliye",
-                    "mein bolna", "bhasha badlo", "bhasha change",
+                    "mein bolna", "mujhe", "main", "hum",
+                    "bhasha badlo", "bhasha change",
+                    "bolna chahta", "bolna chahti", "bolna chahte",
+                    "baat karna", "baat karni", "baat karte",
                     "\u092d\u093e\u0937\u093e \u092c\u0926\u0932", "\u092d\u093e\u0937\u093e \u092c\u0926\u0932\u094b",
                     "\u092e\u0947\u0902 \u092c\u094b\u0932\u094b", "\u092e\u0947\u0902 \u092c\u093e\u0924",
+                    "\u092e\u0941\u091d\u0947", "\u092e\u0948\u0902 \u091a\u093e\u0939",
+                    # Bengali — "I want to speak in X" (ami banglay kotha bolte chai)
+                    "bolte chai", "bolte chhi", "kotha bolbo", "boltে চাই",
+                    "\u0986\u09ae\u09bf", "\u0995\u09a5\u09be \u09ac\u09b2\u09a4\u09c7",
+                    # Tamil — "naan X la pesanum" / "X la pesuven"
+                    "pesanum", "pesuven", "pesu",
+                    # Telugu — "naaku X lo maatladali"
+                    "maatladali", "maatladanam",
+                    # Kannada — "naanu X nalli maatadabeku"
+                    "maatadabeku", "maatadi",
+                    # Malayalam — "ente X il saarikshanam"
+                    "saarikkanam", "parayan",
                     # Other scripts — "language" / "switch" equivalents
                     "\u092d\u093e\u0937\u093e", "\u09ad\u09be\u09b7\u09be",
                     "\u0bae\u0bca\u0bb4\u0bbf \u0bae\u0bbe\u0bb1\u0bc1",
@@ -572,18 +698,63 @@ class BookingProcessor(FrameProcessor):
                 )
             )
             if is_explicit_switch:
+                # User directly stated their language preference → silent switch, no yes/no needed.
+                # Clear any pending auto-offer.
+                self._pending_lang_confirm = None
+                self._lang_offer_context = None
                 self._apply_language(switch_lang)
-                ack = _LANGUAGE_ACK[switch_lang]
-                logger.info(f"[{self.session_id}] Mid-call language switch → {switch_lang}")
-                if self._on_control:
-                    await self._on_control({"type": "response", "text": ack})
-                await self._speak_direct(ack, _SARVAM_LANG_MAP.get(switch_lang, "en-IN"))
-                return
+                logger.info(f"[{self.session_id}] Explicit language preference → {switch_lang} (silent, no confirmation)")
+                # Fall through: LLM responds naturally in the new language.
 
-        # Language is locked after selection — no auto-switch based on STT language_code.
-        # STT frequently misidentifies scripts (e.g. Marathi spoken in Devanagari → "hi-IN")
-        # which would silently break the chosen language mid-conversation.
-        # Intentional mid-call language changes are handled by the explicit keyword block above.
+        # ── Auto language-offer: detect STT language, offer once if != English ──
+        # Trigger ONLY when the utterance is a proper sentence (≥6 words), to avoid
+        # false positives from short answers, names, or single words.
+        # English is the default. If STT reports a non-English language consistently,
+        # inject a [Language Offer] block so the LLM asks naturally (one turn only).
+        # If the user confirms → silently switch. If they decline → stay in English.
+        _STT_OFFER_MIN_WORDS = 6  # don't offer on short/ambiguous utterances
+
+        if self._pending_lang_confirm:
+            # User is responding to a language offer — check for yes/no.
+            _resp = user_text.lower().strip().rstrip(".,!?;:")
+            _resp_words = set(_resp.split())
+            if _resp_words & _YES_WORDS or _resp in _YES_WORDS:
+                _offered = self._pending_lang_confirm
+                self._pending_lang_confirm = None
+                self._lang_offer_context = None
+                self._apply_language(_offered)
+                logger.info(
+                    f"[{self.session_id}] User confirmed language switch to {_offered} — "
+                    "continuing in same flow"
+                )
+                # Fall through: LLM will respond naturally in the new language
+            elif _resp_words & _NO_WORDS or _resp in _NO_WORDS:
+                logger.info(
+                    f"[{self.session_id}] User declined language switch — staying in {self.language}"
+                )
+                self._pending_lang_confirm = None
+                self._lang_offer_context = None
+                # Fall through: continue in current language
+            # else: ambiguous — keep offer active, LLM will re-ask gently next turn
+
+        elif self.language == "en" and not self._pending_lang_confirm:
+            # Not yet in an offer cycle — check if STT reported a non-English language
+            # Only trigger if the utterance is long enough to be a real sentence.
+            detected_lang = _parse_stt_lang(getattr(frame, "language", None))
+            _word_count = len(user_text.split())
+            if detected_lang and detected_lang != "en" and _word_count >= _STT_OFFER_MIN_WORDS:
+                lang_name = _LANG_NAMES.get(detected_lang, detected_lang)
+                logger.info(
+                    f"[{self.session_id}] STT detected '{detected_lang}' on {_word_count}-word utterance "
+                    "— offering language switch"
+                )
+                self._pending_lang_confirm = detected_lang
+                self._lang_offer_context = (
+                    f"[Language Offer]\n"
+                    f"The caller appears to be speaking {lang_name}. "
+                    f"In ONE friendly sentence, ask if they'd like to continue in {lang_name}. "
+                    f"Do NOT ask any booking question this turn — just ask about the language preference."
+                )
 
         # ── Smart filler hold: "hmm", "uh", "ok" → wait for continuation ──
         # Instead of immediately responding, hold the filler for _STITCH_TIMEOUT_SECS.
@@ -868,14 +1039,18 @@ class BookingProcessor(FrameProcessor):
         # ── Step 2: Track current transcript for barge-in fragment stitching ──
         self._current_transcript = user_text
 
-        # ── Step 3: Push TranscriptionFrame downstream — LLM starts IMMEDIATELY ──
+        # ── Step 3: Increment turn sequence — used to detect stale background tasks ──
+        self._turn_seq += 1
+        my_seq = self._turn_seq
+
+        # ── Step 4: Push TranscriptionFrame downstream — LLM starts IMMEDIATELY ──
         await self.push_frame(frame, FrameDirection.DOWNSTREAM)
 
-        # ── Step 3: Spawn extraction + booking update in BACKGROUND ──
+        # ── Step 5: Spawn extraction + booking update in BACKGROUND ──
         # Do NOT cancel the previous task — let it complete so the draft
         # accumulates fields from all turns (was the booking-not-saving bug).
         self._extraction_task = asyncio.create_task(
-            self._update_booking_context(user_text)
+            self._update_booking_context(user_text, my_seq)
         )
 
     # ──────────────────────────────────────────────────────────────────────────
@@ -894,7 +1069,13 @@ class BookingProcessor(FrameProcessor):
         empty assistant message, leaving two back-to-back user turns that the
         Sarvam API rejects with HTTP 400 "turns must alternate").
         """
-        if self._last_booking_context:
+        # Build the booking-state portion of the system prompt.
+        # Language offer (if active) takes EXCLUSIVE priority — suppress all booking
+        # context so the LLM focuses solely on asking about the language preference.
+        # Once the offer is resolved, normal booking context resumes.
+        if self._lang_offer_context:
+            new_content = self._base_prompt + _CONTEXT_SEPARATOR + self._lang_offer_context
+        elif self._last_booking_context:
             new_content = self._base_prompt + _CONTEXT_SEPARATOR + self._last_booking_context
         else:
             new_content = self._base_prompt
@@ -923,7 +1104,7 @@ class BookingProcessor(FrameProcessor):
     #  Background extraction (parallel with LLM streaming)
     # ──────────────────────────────────────────────────────────────────────────
 
-    async def _update_booking_context(self, user_text: str):
+    async def _update_booking_context(self, user_text: str, turn_seq: int):
         """
         Run extraction + process_turn in background AFTER push_frame.
 
@@ -931,6 +1112,10 @@ class BookingProcessor(FrameProcessor):
         in _last_booking_context and will be used on the NEXT turn.
 
         This saves ~2.8s per turn (no blocking before LLM start).
+
+        turn_seq: sequence number captured at spawn. If a newer turn has already
+        completed by the time we finish, we skip _last_booking_context writes and
+        proactive pushes to avoid overwriting fresher state with stale results.
         """
         try:
             clinic_depts = self._clinic_info.get("departments", [])
@@ -943,13 +1128,42 @@ class BookingProcessor(FrameProcessor):
             prev_draft = dict(_session_pre.draft) if _session_pre else {}
             prev_awaiting_confirmation = bool(getattr(_session_pre, "awaiting_confirmation", False))
 
+            # Build awaiting_state hint so extraction knows what to focus on
+            _awaiting_state: str | None = None
+            if _session_pre:
+                if _session_pre.awaiting_age_confirmation:
+                    _awaiting_state = f"awaiting age confirmation — user is responding to: 'Is the age {_session_pre.draft.get('age')} correct?'"
+                elif _session_pre.awaiting_name_confirmation:
+                    _awaiting_state = f"awaiting name confirmation — user is responding to: 'Is the name {_session_pre.draft.get('name')} correct?'"
+                elif _session_pre.awaiting_confirmation:
+                    _awaiting_state = "awaiting booking confirmation — user is responding to 'Shall I go ahead and book?'"
+                elif _session_pre.awaiting_reschedule_confirm:
+                    _awaiting_state = "awaiting reschedule or new booking choice"
+                elif _session_pre.awaiting_time_clarification:
+                    _awaiting_state = f"awaiting AM/PM clarification for time '{_session_pre.time_clarification_value}'"
+                elif getattr(_session_pre, "awaiting_contact_confirmation", False):
+                    _awaiting_state = f"awaiting contact number confirmation — user is choosing whether to use {_session_pre.phone} or provide a different number"
+                elif getattr(_session_pre, "awaiting_channel_selection", False):
+                    _awaiting_state = "awaiting communication channel selection — user is choosing WhatsApp, SMS, email, or voice call"
+                elif offered_times:
+                    _awaiting_state = f"awaiting slot selection from offered times: {', '.join(offered_times)}"
+                else:
+                    from booking.manager import FIELD_ORDER
+                    missing = [f for f in FIELD_ORDER if not _session_pre.draft.get(f)]
+                    if missing:
+                        _awaiting_state = f"collecting missing field: {missing[0]}"
+
             extraction = await extract_booking_info(
                 user_text=user_text,
                 current_draft=self.booking_manager.draft,
                 clinic_departments=clinic_depts or None,
                 recent_utterances=recent,
                 offered_times=offered_times or None,
+                awaiting_state=_awaiting_state,
+                today_date=datetime.now(ZoneInfo(os.getenv("DEFAULT_TIMEZONE", "Asia/Kolkata"))).strftime("%-d %b"),
             )
+            # Attach raw user_text so contact confirmation handlers can do keyword matching
+            extraction["_user_text"] = user_text
             logger.info(
                 f"[{self.session_id}] Extraction: intent={extraction.get('intent')} "
                 f"confirm={extraction.get('confirm')}"
@@ -977,10 +1191,20 @@ class BookingProcessor(FrameProcessor):
 
             context_text = result.get("context", "")
 
+            # ── Stale-turn guard ──────────────────────────────────────────
+            # If a newer turn has already completed, skip all side-effects
+            # (context write + proactive push) to avoid overwriting fresh state.
+            is_stale = self._turn_seq > turn_seq
+            if is_stale:
+                logger.debug(
+                    f"[{self.session_id}] Stale turn seq={turn_seq} "
+                    f"(current={self._turn_seq}) — skipping context write & proactive push"
+                )
+
             # Snapshot stale context BEFORE overwriting — used for TextFrame guard below
             stale_context = self._last_booking_context
 
-            if context_text:
+            if context_text and not is_stale:
                 self._last_booking_context = context_text
                 logger.debug(
                     f"[{self.session_id}] Context cached for next turn "
@@ -996,9 +1220,10 @@ class BookingProcessor(FrameProcessor):
             #   2. The time/details come from draft — never hallucinated.
             #
             # GUARDS:
-            # - Don't fire when stale context was presenting slot choices / change
-            #   request — LLM is already handling those; concurrent TextFrame causes
-            #   contradictions (bug: Turn 13 in 18:03 test log).
+            # - Skip if this is a stale turn (newer turn already completed).
+            # - Don't fire when stale context was presenting slot choices WITHOUT
+            #   a time change — LLM is already handling those with a coherent ack;
+            #   concurrent TextFrame causes contradictions.
             # - DO fire even if _prev_awaiting_confirmation=True when draft.time
             #   just changed (user picked a different slot mid-confirmation).
             _CHOICE_CONTEXT_MARKERS = (
@@ -1030,13 +1255,16 @@ class BookingProcessor(FrameProcessor):
             if field_corrected_during_confirmation:
                 _session.confirmation_presented_to_llm = False
 
-            # Fire if: (False→True transition OR draft.time changed) AND not offering choices
-            # IMPORTANT: when time_changed=True (user picked a specific slot), allow firing
-            # even if stale context had slot options — that IS the normal selection flow.
-            # Only block when time did NOT change (e.g. bare "yes/yeah" re-triggered slot check
-            # on same time) AND stale context was presenting choices — avoids contradiction.
+            # When the LLM already acknowledged a slot pick ("Perfect, 6 PM it is."),
+            # the stale context was [Available Slots] and time just changed.
+            # We still want to push the confirmation question — but without "X is available!"
+            # since the LLM just said that. Skipping it entirely would leave the user
+            # waiting forever for a confirmation that never comes.
+            llm_already_handled_slot_pick = stale_was_offering and time_changed
+
             should_push_confirmation = (
-                now_awaiting
+                not is_stale
+                and now_awaiting
                 and _session
                 and not _session.confirmation_presented_to_llm
                 and (
@@ -1060,23 +1288,33 @@ class BookingProcessor(FrameProcessor):
                     "mr": "ठीक आहे, अपडेट केले.",
                     "gu": "ઠીક છે, અપડેટ કર્યું.",
                     "pa": "ਠੀਕ ਹੈ, ਅੱਪਡੇਟ ਕੀਤਾ।",
-                    "od": "ଠିକ ଅଛି, ଅପଡ଼େଟ ହୋଇଛି।",
+                    "od": "ଠيক ଅଛي, ଅपডেট ହোইছি।",
                 }
-                conf_text = self._build_confirmation_text(_session.draft, time_just_selected=time_changed)
+                # When LLM already acked the slot pick, skip the "X is available!" lead-in
+                # (LLM already said "Perfect, X it is.") to avoid sounding repetitive.
+                time_just_selected = time_changed and not llm_already_handled_slot_pick
+                conf_text = self._build_confirmation_text(
+                    _session.draft, time_just_selected=time_just_selected
+                )
                 if field_corrected_during_confirmation:
                     prefix = _CORRECTION_PREFIX.get(self.language, "Got it, updated!")
                     conf_text = prefix + " " + conf_text
                 _session.confirmation_presented_to_llm = True
                 logger.info(
                     f"[{self.session_id}] Proactive confirmation readback "
-                    f"(time_changed={time_changed}): '{conf_text}'"
+                    f"(time_changed={time_changed}, llm_acked_slot={llm_already_handled_slot_pick}): "
+                    f"'{conf_text}'"
                 )
+                # Eagerly write confirmation context so next LLM turn sees [Awaiting Confirmation]
+                if context_text:
+                    self._last_booking_context = context_text
                 await self.push_frame(TextFrame(conf_text), FrameDirection.DOWNSTREAM)
             self._prev_awaiting_confirmation = now_awaiting
             # ───────────────────────────────────────────────────────────────
 
             if result.get("end_call"):
-                logger.info(f"[{self.session_id}] Booking complete — end_call flagged")
+                logger.info(f"[{self.session_id}] Booking complete — scheduling graceful call end")
+                asyncio.create_task(self._end_call_after_tts())
 
         except asyncio.CancelledError:
             logger.info(f"[{self.session_id}] Background extraction cancelled (barge-in)")
@@ -1163,7 +1401,14 @@ class BookingProcessor(FrameProcessor):
         hours = self._clinic_info.get("working_hours", {})
         if isinstance(hours, dict):
             hours = ", ".join(f"{k}: {v}" for k, v in hours.items())
-        self._base_prompt = get_system_prompt(lang, clinic_name, depts, hours or None)
+        # Universal prompt — language param ignored, same prompt for all languages.
+        # TTS language is updated below so speech is in the caller's language.
+        self._base_prompt = get_smart_prompt(
+            clinic_name=clinic_name or None,
+            departments=depts or None,
+            working_hours=hours or None,
+            caller_phone=self.phone,
+        )
         logger.info(f"[{self.session_id}] Language applied: {prev} → {lang}")
         # Update TTS language so subsequent speech is spoken in the chosen language
         pipecat_lang = _LANG_TO_PIPECAT.get(lang, Language.EN_IN)

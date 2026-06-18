@@ -1,9 +1,8 @@
 """
-SarvamMLLMProcessor — Custom Pipecat LLM processor for sarvam-m
+SarvamLLMProcessor — Custom Pipecat LLM processor for sarvam-30b
 
-Pipecat's built-in SarvamLLMService only supports sarvam-30b/105b.
-This processor wraps our raw-HTTP llm.py streaming implementation so that
-sarvam-m can be used natively in the Pipecat pipeline.
+Wraps our raw-HTTP llm.py streaming implementation so that
+sarvam-30b can be used natively in the Pipecat pipeline.
 
 Frame flow (same contract as OpenAILLMService):
   LLMContextFrame → LLMFullResponseStartFrame
@@ -23,14 +22,14 @@ from pipecat.frames.frames import (
 )
 from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
 
-import llm as llm_module
+import services.llm as llm_module
 
-logger = logging.getLogger("sarvam_m_llm")
+logger = logging.getLogger("sarvam_llm")
 
 
-class SarvamMLLMProcessor(FrameProcessor):
+class SarvamLLMProcessor(FrameProcessor):
     """
-    Drop-in replacement for SarvamLLMService that uses sarvam-m via raw HTTP.
+    Custom Pipecat LLM processor for sarvam-30b via raw HTTP.
 
     Receives LLMContextFrame (produced by context_pair.user()), streams the
     response via our llm.generate_response_streaming(), and emits TextFrames

@@ -21,8 +21,8 @@ from pipecat.pipeline.task import PipelineTask, PipelineParams
 # Import Sarvam services from their specific modules (not from __init__)
 from pipecat.services.sarvam.stt import SarvamSTTService
 from pipecat.services.sarvam.tts import SarvamTTSService
-# SarvamLLMService only supports 30b/105b — use custom processor for sarvam-m
-from processors.sarvam_m_llm import SarvamMLLMProcessor
+# Custom LLM processor wrapping raw HTTP calls to Sarvam Chat Completions API
+from processors.sarvam_llm import SarvamLLMProcessor
 from pipecat.frames.frames import (
     Frame,
     AudioRawFrame,
@@ -40,9 +40,9 @@ from pipecat.turns.user_stop.speech_timeout_user_turn_stop_strategy import Speec
 from pipecat.turns.user_turn_strategies import UserTurnStrategies
 
 # Business logic imports
-from backend_client import BackendClient
-from booking_manager import VoiceBookingManager
-from prompts.loader import get_system_prompt
+from services.backend_client import BackendClient
+from booking.manager import VoiceBookingManager
+from prompts.loader import get_system_prompt, get_smart_prompt
 
 # Custom processors (we'll create these next)
 from processors.audio_output import AudioOutputProcessor
@@ -109,7 +109,7 @@ class PipecatWorker:
             tts_model = os.getenv("TTS_MODEL", "bulbul:v3")
             tts_speaker = os.getenv("TTS_SPEAKER", "priya")
             tts_language = os.getenv("TTS_TARGET_LANGUAGE", "unknown")
-            llm_model = os.getenv("LLM_MODEL", "sarvam-m")  # read by SarvamMLLMProcessor via llm.py
+            llm_model = os.getenv("LLM_MODEL", "sarvam-30b")  # read by SarvamLLMProcessor via llm.py
 
             # Prefetch clinic info once — avoids per-turn API calls in BookingProcessor
             clinic_info = await self._fetch_clinic_info()
@@ -121,16 +121,16 @@ class PipecatWorker:
                 model=stt_model,
                 language=None if stt_language == "unknown" else stt_language,
                 vad_signals=True,
-                high_vad_sensitivity=True,
+                high_vad_sensitivity=False,  # True is too sensitive for calls with background noise/voices
             )
             stt = SarvamSTTService(
                 api_key=sarvam_api_key,
                 settings=stt_settings,
             )
 
-            # LLM: custom sarvam-m processor (raw HTTP, bypasses Pipecat SDK restriction)
-            llm = SarvamMLLMProcessor(on_control_message=self.on_control_message)
-            logger.info(f"[{self.session_id}] Using SarvamMLLMProcessor with model={llm_model}")
+            # LLM: custom processor — raw HTTP to Sarvam Chat Completions API
+            llm = SarvamLLMProcessor(on_control_message=self.on_control_message)
+            logger.info(f"[{self.session_id}] Using SarvamLLMProcessor with model={llm_model}")
 
             # TTS: Sarvam Bulbul TTS service
             # Start with en-IN (Bulbul v3 is multilingual — it handles Hindi/Tamil/etc.
@@ -151,7 +151,18 @@ class PipecatWorker:
             )
 
             # ── 2. Create LLM context with system prompt ──
-            system_prompt = get_system_prompt(self.language)
+            # Use universal smart prompt (language-agnostic — sarvam-30b adapts naturally)
+            clinic_name = clinic_info.get("name", "") if clinic_info else ""
+            depts = clinic_info.get("departments", []) if clinic_info else []
+            hours = clinic_info.get("working_hours", {}) if clinic_info else {}
+            if isinstance(hours, dict):
+                hours = ", ".join(f"{k}: {v}" for k, v in hours.items())
+            system_prompt = get_smart_prompt(
+                clinic_name=clinic_name or None,
+                departments=depts or None,
+                working_hours=hours or None,
+                caller_phone=self.phone,
+            )
             context = LLMContext(messages=[{"role": "system", "content": system_prompt}])
 
             # ── 3. Create context aggregator pair ──
@@ -206,7 +217,11 @@ class PipecatWorker:
             ])
 
             # ── 6. Create pipeline task ──
-            pipeline_idle_timeout = float(os.getenv("PIPELINE_IDLE_TIMEOUT_SECS", "120"))
+            # idle_timeout_secs: how long with no frames in the task queue before
+            # auto-cancel. Push_frame() from inside processors does NOT reset this
+            # timer — only task.queue_frame() does (i.e. incoming user audio frames).
+            # Set generously so slow backend reservation calls don’t trigger it.
+            pipeline_idle_timeout = float(os.getenv("PIPELINE_IDLE_TIMEOUT_SECS", "300"))
             self.task = PipelineTask(
                 self.pipeline,
                 params=PipelineParams(
