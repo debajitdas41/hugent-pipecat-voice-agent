@@ -145,7 +145,7 @@ class PipecatWorker:
             )
             tts = SarvamTTSService(
                 api_key=sarvam_api_key,
-                sample_rate=8000,   # Must match browser AudioWorklet (16kHz)
+                sample_rate=8000,   # Must match FreJun telephony output (8kHz PCM)
                 settings=tts_settings,
                 min_buffer_size=25,
             )

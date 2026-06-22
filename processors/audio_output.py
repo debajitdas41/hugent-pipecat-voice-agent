@@ -6,7 +6,7 @@ the WebSocket client for playback in the browser.
 """
 import logging
 from typing import Callable, Awaitable
-from pipecat.frames.frames import OutputAudioRawFrame, Frame, TTSAudioRawFrame, TTSStoppedFrame
+from pipecat.frames.frames import OutputAudioRawFrame, Frame, TTSAudioRawFrame, TTSStoppedFrame, LLMFullResponseEndFrame
 from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
 
 logger = logging.getLogger("audio_output")
@@ -42,9 +42,18 @@ class AudioOutputProcessor(FrameProcessor):
             except Exception as e:
                 logger.error(f"Error sending audio to WebSocket: {e}")
         elif isinstance(frame, TTSStoppedFrame):
+            # Do NOT flush here — more TTS sentences may follow in the same LLM turn.
+            # Flushing per-sentence injects up to 600ms of silence padding between each
+            # sentence, causing the mid-sentence "breaks". Pass through so downstream
+            # processors (context tracking) still see the frame.
+            logger.debug("[audio_out] TTSStoppedFrame — holding buffer for next sentence")
+            await self.push_frame(frame, direction)
+        elif isinstance(frame, LLMFullResponseEndFrame):
+            # Full LLM response is done — now flush the tail of the pacing buffer
+            # (one flush per turn instead of one per sentence).
             try:
                 logger.info(
-                    f"[audio_out] TTSStoppedFrame — flushing tail. "
+                    f"[audio_out] LLMFullResponseEndFrame — flushing tail. "
                     f"Total: {self._tts_chunk_count} chunks, {self._tts_total_bytes}B"
                 )
                 self._tts_chunk_count = 0
@@ -52,5 +61,6 @@ class AudioOutputProcessor(FrameProcessor):
                 await self.on_audio_chunk(b"", end_of_tts=True)
             except Exception as e:
                 logger.error(f"Error sending end-of-TTS signal: {e}")
+            await self.push_frame(frame, direction)
         else:
             await self.push_frame(frame, direction)

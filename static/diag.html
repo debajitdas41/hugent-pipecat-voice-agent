@@ -1,0 +1,520 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Voice Agent — Audio Diagnostics</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: 'Courier New', monospace; background: #0d1117; color: #c9d1d9; font-size: 13px; }
+
+  /* ── Header ── */
+  header {
+    display: flex; align-items: center; gap: 16px;
+    background: #161b22; border-bottom: 1px solid #30363d;
+    padding: 10px 20px;
+  }
+  header h1 { font-size: 16px; color: #58a6ff; font-weight: bold; flex: 1; }
+  #status { padding: 4px 10px; border-radius: 12px; font-size: 12px; font-weight: bold; }
+  #status.connected    { background: #1a4731; color: #3fb950; }
+  #status.connecting   { background: #3d2b00; color: #d29922; }
+  #status.disconnected { background: #3d1a1a; color: #f85149; }
+  button { background: #21262d; border: 1px solid #30363d; color: #c9d1d9; padding: 5px 14px; border-radius: 6px; cursor: pointer; font-family: inherit; }
+  button:hover { background: #30363d; }
+
+  /* ── Stats grid ── */
+  #stats-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+    gap: 8px; padding: 12px 20px;
+    background: #161b22; border-bottom: 1px solid #30363d;
+  }
+  .stat-card { background: #0d1117; border: 1px solid #21262d; border-radius: 6px; padding: 8px 12px; }
+  .stat-card .label { font-size: 10px; color: #8b949e; text-transform: uppercase; letter-spacing: 0.5px; }
+  .stat-card .value { font-size: 20px; font-weight: bold; color: #58a6ff; margin-top: 2px; }
+  .stat-card.warn .value { color: #d29922; }
+  .stat-card.danger .value { color: #f85149; }
+
+  /* ── Chart ── */
+  #chart-wrap { padding: 12px 20px; background: #161b22; border-bottom: 1px solid #30363d; }
+  #chart-wrap h3 { font-size: 12px; color: #8b949e; margin-bottom: 6px; }
+  canvas { width: 100%; height: 80px; display: block; background: #0d1117; border-radius: 4px; }
+
+  /* ── Log table ── */
+  #log-wrap { padding: 0 20px 20px; overflow: auto; max-height: calc(100vh - 260px); }
+  table { width: 100%; border-collapse: collapse; font-size: 12px; }
+  thead th { position: sticky; top: 0; background: #161b22; color: #8b949e; text-align: left; padding: 6px 8px; border-bottom: 1px solid #30363d; font-weight: normal; }
+  tbody tr { border-bottom: 1px solid #161b22; transition: background 0.1s; }
+  tbody tr:hover { background: #161b22; }
+  tbody td { padding: 4px 8px; vertical-align: middle; }
+
+  /* event type badges */
+  .badge { display: inline-block; padding: 1px 7px; border-radius: 10px; font-size: 10px; font-weight: bold; }
+  .badge-tts_chunk { background: #1a3f5c; color: #79c0ff; }
+  .badge-buf_send  { background: #1a3d1a; color: #3fb950; }
+  .badge-buf_flush { background: #3d2f00; color: #e3b341; }
+  .badge-barge_in  { background: #3d1a1a; color: #f85149; }
+
+  /* click risk highlight */
+  tr.click-risk { background: rgba(248, 81, 73, 0.08) !important; }
+  tr.click-risk:hover { background: rgba(248, 81, 73, 0.14) !important; }
+  .click-badge { display: inline-block; background: #f85149; color: #fff; font-size: 9px; padding: 1px 5px; border-radius: 8px; margin-left: 4px; }
+
+  /* gap warnings */
+  .gap-warn { color: #d29922; }
+  .gap-danger { color: #f85149; font-weight: bold; }
+
+  #no-data { text-align: center; color: #8b949e; padding: 40px; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>🎙 Voice Agent — Audio Packet Diagnostics</h1>
+  <span id="status" class="disconnected">DISCONNECTED</span>
+  <button id="btn-clear">Clear Log</button>
+  <button id="btn-pause">Pause</button>
+  <label style="font-size:12px; color:#8b949e">
+    <input type="checkbox" id="chk-click-only" style="margin-right:4px">Click Risk Only
+  </label>
+  <button id="btn-dl-json" title="Download all raw events as JSON — share this with AI for analysis" style="background:#1a3f5c;border-color:#58a6ff;color:#79c0ff">⬇ JSON</button>
+  <button id="btn-dl-report" title="Download a human-readable text report" style="background:#1a3d1a;border-color:#3fb950;color:#56d364">⬇ Report</button>
+</header>
+
+<div id="stats-grid">
+  <div class="stat-card"><div class="label">TTS Chunks</div><div class="value" id="s-tts-n">0</div></div>
+  <div class="stat-card"><div class="label">FreJun Sends</div><div class="value" id="s-send-n">0</div></div>
+  <div class="stat-card"><div class="label">Flushes</div><div class="value" id="s-flush-n">0</div></div>
+  <div class="stat-card"><div class="label">Barge-ins</div><div class="value" id="s-bargein-n">0</div></div>
+  <div class="stat-card"><div class="label">TTS Recv (KB)</div><div class="value" id="s-tts-kb">0</div></div>
+  <div class="stat-card"><div class="label">Sent to FreJun (KB)</div><div class="value" id="s-send-kb">0</div></div>
+  <div class="stat-card warn"><div class="label">Padding (KB)</div><div class="value" id="s-pad-kb">0</div></div>
+  <div class="stat-card danger"><div class="label">Click Risks</div><div class="value" id="s-clicks">0</div></div>
+  <div class="stat-card"><div class="label">Avg Send Gap (ms)</div><div class="value" id="s-avg-gap">—</div></div>
+  <div class="stat-card danger"><div class="label">Max Send Gap (ms)</div><div class="value" id="s-max-gap">—</div></div>
+  <div class="stat-card"><div class="label">Queue Depth Max</div><div class="value" id="s-q-max">0</div></div>
+  <div class="stat-card"><div class="label">Current Session</div><div class="value" id="s-session" style="font-size:11px;color:#8b949e">—</div></div>
+</div>
+
+<div id="chart-wrap">
+  <h3>Send Gap (ms) over time — red line = 600ms target — spikes = silence gaps</h3>
+  <canvas id="gap-chart" height="80"></canvas>
+</div>
+
+<div id="log-wrap">
+  <table id="log-table">
+    <thead>
+      <tr>
+        <th>Time</th>
+        <th>Type</th>
+        <th>Size</th>
+        <th>Gap (ms)</th>
+        <th>Q Depth</th>
+        <th>Buf / Padding</th>
+        <th>First→Last Sample</th>
+        <th>Notes</th>
+      </tr>
+    </thead>
+    <tbody id="log-body">
+      <tr id="no-data"><td colspan="8" id="no-data">Waiting for events… open a call to start.</td></tr>
+    </tbody>
+  </table>
+</div>
+
+<script>
+// ── State ──────────────────────────────────────────────────────────────────
+let ws = null;
+let paused = false;
+let clickOnly = false;
+let events = [];
+const MAX_EVENTS = 500;
+
+// Stats accumulators
+const stats = {
+  ttsN: 0, sendN: 0, flushN: 0, bargeN: 0,
+  ttsKb: 0, sendKb: 0, padKb: 0, clicks: 0,
+  sendGaps: [], qMax: 0, session: '—'
+};
+
+// Chart data
+const gapHistory = [];  // { gap_ms, click }
+const CHART_MAX = 200;
+
+// ── WebSocket ──────────────────────────────────────────────────────────────
+function connect() {
+  const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+  const url = `${proto}://${location.host}/ws-diag`;
+  setStatus('connecting');
+  ws = new WebSocket(url);
+
+  ws.onopen = () => {
+    setStatus('connected');
+    // keep-alive ping
+    setInterval(() => { if (ws && ws.readyState === 1) ws.send('ping'); }, 15000);
+  };
+  ws.onclose = () => { setStatus('disconnected'); setTimeout(connect, 2000); };
+  ws.onerror = () => ws.close();
+
+  ws.onmessage = (e) => {
+    let ev;
+    try { ev = JSON.parse(e.data); } catch { return; }
+    // Ignore internal control messages
+    if (ev.type === 'connected' || ev.type === 'pong') return;
+    if (!paused) handleEvent(ev);
+  };
+}
+
+function setStatus(s) {
+  const el = document.getElementById('status');
+  el.className = s;
+  el.textContent = s.toUpperCase();
+}
+
+// ── Event handling ─────────────────────────────────────────────────────────
+function handleEvent(ev) {
+  updateStats(ev);
+  updateChart(ev);
+  addRow(ev);
+}
+
+function updateStats(ev) {
+  const t = ev.type;
+  if (t === 'tts_chunk') {
+    stats.ttsN++;
+    stats.ttsKb = ev.cum_tts_kb || stats.ttsKb;
+    stats.session = ev.session || stats.session;
+  } else if (t === 'buf_send') {
+    stats.sendN++;
+    stats.sendKb = ev.cum_send_kb || stats.sendKb;
+    if (ev.gap_ms > 0) stats.sendGaps.push(ev.gap_ms);
+    if ((ev.queue_depth || 0) > stats.qMax) stats.qMax = ev.queue_depth;
+    if (ev.click_risk) stats.clicks++;
+  } else if (t === 'buf_flush') {
+    stats.flushN++;
+    stats.padKb = ev.cum_padding_kb || stats.padKb;
+  } else if (t === 'barge_in') {
+    stats.bargeN++;
+  }
+
+  // Render
+  setText('s-tts-n', stats.ttsN);
+  setText('s-send-n', stats.sendN);
+  setText('s-flush-n', stats.flushN);
+  setText('s-bargein-n', stats.bargeN);
+  setText('s-tts-kb', stats.ttsKb);
+  setText('s-send-kb', stats.sendKb);
+  setText('s-pad-kb', stats.padKb);
+  setText('s-clicks', stats.clicks);
+  setText('s-q-max', stats.qMax);
+  setText('s-session', stats.session.slice(-12));
+
+  if (stats.sendGaps.length > 0) {
+    const avg = Math.round(stats.sendGaps.reduce((a, b) => a + b, 0) / stats.sendGaps.length);
+    const max = Math.max(...stats.sendGaps);
+    setText('s-avg-gap', avg);
+    const maxEl = document.getElementById('s-max-gap');
+    maxEl.textContent = max;
+    maxEl.parentElement.className = 'stat-card' + (max > 900 ? ' danger' : max > 700 ? ' warn' : '');
+  }
+}
+
+function setText(id, val) { document.getElementById(id).textContent = val; }
+
+// ── Chart ──────────────────────────────────────────────────────────────────
+function updateChart(ev) {
+  if (ev.type !== 'buf_send') return;
+  gapHistory.push({ gap: ev.gap_ms || 0, click: ev.click_risk || false });
+  if (gapHistory.length > CHART_MAX) gapHistory.shift();
+  drawChart();
+}
+
+function drawChart() {
+  const canvas = document.getElementById('gap-chart');
+  const W = canvas.parentElement.clientWidth - 40;
+  const H = 80;
+  canvas.width = W; canvas.height = H;
+  const ctx = canvas.getContext('2d');
+  ctx.clearRect(0, 0, W, H);
+
+  const target = 600;
+  const maxVal = Math.max(1200, ...gapHistory.map(g => g.gap));
+
+  // Grid lines
+  ctx.strokeStyle = '#21262d'; ctx.lineWidth = 1;
+  [300, 600, 900, 1200].forEach(v => {
+    const y = H - (v / maxVal) * (H - 4) - 2;
+    ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke();
+    ctx.fillStyle = '#8b949e'; ctx.font = '9px monospace';
+    ctx.fillText(v + 'ms', 2, y - 2);
+  });
+
+  // Target line (600ms)
+  const ty = H - (target / maxVal) * (H - 4) - 2;
+  ctx.strokeStyle = '#f0883e'; ctx.lineWidth = 1; ctx.setLineDash([4, 4]);
+  ctx.beginPath(); ctx.moveTo(0, ty); ctx.lineTo(W, ty); ctx.stroke();
+  ctx.setLineDash([]);
+
+  const n = gapHistory.length;
+  if (n < 2) return;
+  const step = W / (CHART_MAX - 1);
+
+  // Gap line
+  ctx.strokeStyle = '#3fb950'; ctx.lineWidth = 1.5;
+  ctx.beginPath();
+  gapHistory.forEach((g, i) => {
+    const x = i * step;
+    const y = H - (Math.min(g.gap, maxVal) / maxVal) * (H - 4) - 2;
+    i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+  });
+  ctx.stroke();
+
+  // Click risk markers
+  gapHistory.forEach((g, i) => {
+    if (!g.click) return;
+    const x = i * step;
+    const y = H - (Math.min(g.gap, maxVal) / maxVal) * (H - 4) - 2;
+    ctx.fillStyle = '#f85149';
+    ctx.beginPath(); ctx.arc(x, y, 3, 0, 2 * Math.PI); ctx.fill();
+  });
+}
+
+// ── Log table ──────────────────────────────────────────────────────────────
+function addRow(ev) {
+  if (clickOnly && ev.type !== 'barge_in' && !ev.click_risk && ev.type !== 'buf_flush') return;
+
+  const tbody = document.getElementById('log-body');
+  const noData = document.getElementById('no-data');
+  if (noData) noData.remove();
+
+  const t = ev.type;
+  const ts = ev.ts ? new Date(ev.ts).toLocaleTimeString('en-GB', { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit', fractionalSecondDigits: 3 }) : '—';
+  const isClick = ev.click_risk;
+  const gapMs = ev.gap_ms ?? '—';
+  const gapClass = gapMs > 900 ? 'gap-danger' : gapMs > 700 ? 'gap-warn' : '';
+
+  let sizeCell = '—', bufCell = '—', samplesCell = '—', notes = '';
+
+  if (t === 'tts_chunk') {
+    sizeCell = `${ev.size_b}B`;
+    bufCell = `buf=${ev.buf_bytes}B | q=${ev.queue_depth}`;
+    notes = `#${ev.n}`;
+  } else if (t === 'buf_send') {
+    sizeCell = `${ev.size_b}B (${ev.chunk_ms}ms)`;
+    bufCell = `q=${ev.queue_depth}`;
+    samplesCell = `${ev.first_sample} → ${ev.last_sample}`;
+    notes = `#${ev.chunk_id}` + (isClick ? `<span class="click-badge">CLICK!</span>` : '');
+  } else if (t === 'buf_flush') {
+    sizeCell = `${ev.total_b}B`;
+    bufCell = `audio=${ev.audio_b}B | pad=${ev.padding_b}B (${ev.pad_pct}%)`;
+    notes = `flush #${ev.flush_n} | cumPad=${ev.cum_padding_kb}KB`;
+  } else if (t === 'barge_in') {
+    sizeCell = '—';
+    bufCell = `discarded=${ev.discarded_buf_b}B | drained=${ev.drained_queue_chunks} chunks`;
+    notes = `barge-in #${ev.n}`;
+  }
+
+  const tr = document.createElement('tr');
+  if (isClick) tr.className = 'click-risk';
+  tr.innerHTML = `
+    <td>${ts}</td>
+    <td><span class="badge badge-${t}">${t}</span></td>
+    <td>${sizeCell}</td>
+    <td class="${gapClass}">${gapMs}</td>
+    <td>${ev.queue_depth ?? '—'}</td>
+    <td style="font-size:11px;color:#8b949e">${bufCell}</td>
+    <td style="font-size:11px">${samplesCell}</td>
+    <td>${notes}</td>
+  `;
+
+  tbody.insertBefore(tr, tbody.firstChild);  // newest on top
+  events.push(ev);
+  if (events.length > MAX_EVENTS) {
+    events.shift();
+    if (tbody.children.length > MAX_EVENTS) tbody.removeChild(tbody.lastChild);
+  }
+}
+
+// ── Controls ───────────────────────────────────────────────────────────────
+document.getElementById('btn-clear').onclick = () => {
+  document.getElementById('log-body').innerHTML = '<tr><td colspan="8" id="no-data" style="text-align:center;color:#8b949e;padding:40px">Log cleared — waiting for events…</td></tr>';
+  events = [];
+  Object.assign(stats, { ttsN:0,sendN:0,flushN:0,bargeN:0,ttsKb:0,sendKb:0,padKb:0,clicks:0,sendGaps:[],qMax:0 });
+  ['s-tts-n','s-send-n','s-flush-n','s-bargein-n','s-tts-kb','s-send-kb','s-pad-kb','s-clicks','s-q-max','s-avg-gap','s-max-gap'].forEach(id => setText(id,'0'));
+  gapHistory.length = 0; drawChart();
+};
+
+document.getElementById('btn-pause').onclick = function() {
+  paused = !paused;
+  this.textContent = paused ? '▶ Resume' : 'Pause';
+  this.style.color = paused ? '#d29922' : '';
+};
+
+document.getElementById('chk-click-only').onchange = function() {
+  clickOnly = this.checked;
+};
+
+// Redraw chart on resize
+window.onresize = () => drawChart();
+
+// ── Download helpers ──────────────────────────────────────────────────────
+function downloadFile(filename, content, mime) {
+  const blob = new Blob([content], { type: mime });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = filename;
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+}
+
+document.getElementById('btn-dl-json').onclick = () => {
+  if (!events.length) { alert('No events captured yet. Make a call first.'); return; }
+  const ts = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+  const payload = {
+    exported_at: new Date().toISOString(),
+    session: stats.session,
+    summary: buildSummary(),
+    events: events,
+  };
+  downloadFile(`diag_${ts}.json`, JSON.stringify(payload, null, 2), 'application/json');
+};
+
+document.getElementById('btn-dl-report').onclick = () => {
+  if (!events.length) { alert('No events captured yet. Make a call first.'); return; }
+  const ts = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+  downloadFile(`diag_report_${ts}.txt`, buildTextReport(), 'text/plain');
+};
+
+function buildSummary() {
+  const gaps = stats.sendGaps;
+  const avgGap = gaps.length ? Math.round(gaps.reduce((a,b)=>a+b,0)/gaps.length) : 0;
+  const maxGap = gaps.length ? Math.max(...gaps) : 0;
+  const gapOver700 = gaps.filter(g => g > 700).length;
+  const gapOver900 = gaps.filter(g => g > 900).length;
+  const clickEvents = events.filter(e => e.click_risk);
+  const flushEvents = events.filter(e => e.type === 'buf_flush');
+  const avgPadPct = flushEvents.length ? Math.round(flushEvents.reduce((a,e)=>a+(e.pad_pct||0),0)/flushEvents.length) : 0;
+  return {
+    session_id: stats.session,
+    total_events: events.length,
+    tts_chunks_received: stats.ttsN,
+    frejun_sends: stats.sendN,
+    flushes: stats.flushN,
+    barge_ins: stats.bargeN,
+    tts_received_kb: stats.ttsKb,
+    sent_to_frejun_kb: stats.sendKb,
+    silence_padding_kb: stats.padKb,
+    avg_padding_pct_per_flush: avgPadPct,
+    click_risks: stats.clicks,
+    send_gap_avg_ms: avgGap,
+    send_gap_max_ms: maxGap,
+    send_gaps_over_700ms: gapOver700,
+    send_gaps_over_900ms: gapOver900,
+    queue_depth_max: stats.qMax,
+    worst_click_events: clickEvents.slice(0, 10).map(e => ({
+      chunk_id: e.chunk_id,
+      gap_ms: e.gap_ms,
+      first_sample: e.first_sample,
+      last_sample: e.last_sample,
+      queue_depth: e.queue_depth,
+    })),
+    worst_gaps: gaps.slice().sort((a,b)=>b-a).slice(0, 10),
+  };
+}
+
+function buildTextReport() {
+  const s = buildSummary();
+  const now = new Date().toISOString();
+  const line = (l='') => l + '\n';
+  const hr = () => line('─'.repeat(60));
+
+  let r = '';
+  r += line('╔══════════════════════════════════════════════════════════╗');
+  r += line('║      VOICE AGENT — AUDIO DIAGNOSTIC REPORT              ║');
+  r += line('╚══════════════════════════════════════════════════════════╝');
+  r += line();
+  r += line(`Exported  : ${now}`);
+  r += line(`Session   : ${s.session_id}`);
+  r += line();
+
+  r += hr();
+  r += line('TRAFFIC SUMMARY');
+  r += hr();
+  r += line(`TTS chunks received from Sarvam : ${s.tts_chunks_received}  (${s.tts_received_kb} KB)`);
+  r += line(`Chunks sent to FreJun           : ${s.frejun_sends}  (${s.sent_to_frejun_kb} KB)`);
+  r += line(`Buffer flushes (end-of-turn)    : ${s.flushes}`);
+  r += line(`Silence padding injected        : ${s.silence_padding_kb} KB  (avg ${s.avg_padding_pct_per_flush}% per flush)`);
+  r += line(`Barge-ins (interruptions)       : ${s.barge_ins}`);
+  r += line();
+
+  r += hr();
+  r += line('SEND TIMING (gaps between consecutive FreJun sends)');
+  r += hr();
+  r += line(`Average gap : ${s.send_gap_avg_ms} ms   (target: 600 ms)`);
+  r += line(`Max gap     : ${s.send_gap_max_ms} ms  ← ${s.send_gap_max_ms > 900 ? '⚠ PROBLEM — causes silence/dropout' : s.send_gap_max_ms > 700 ? '⚠ slightly high' : 'OK'}`);
+  r += line(`Gaps > 700ms: ${s.send_gaps_over_700ms}  (these cause audible silence)`);
+  r += line(`Gaps > 900ms: ${s.send_gaps_over_900ms}  (these cause definite dropout/break)`);
+  r += line(`Max queue depth seen: ${s.queue_depth_max}  (>3 = pipeline falling behind)`);
+  r += line();
+
+  r += hr();
+  r += line('CLICK / TIK-TIK ANALYSIS');
+  r += hr();
+  r += line(`Click-risk events : ${s.click_risks}  (amplitude jump >3000 at chunk boundary)`);
+  r += line(`Explanation: A "click" = last PCM sample of chunk N differs too much from`);
+  r += line(`first PCM sample of chunk N+1 → FreJun plays it as a pop/tick sound.`);
+  r += line();
+  if (s.worst_click_events.length) {
+    r += line('Worst click events (up to 10):');
+    s.worst_click_events.forEach((e, i) => {
+      r += line(`  ${i+1}. chunk_id=${e.chunk_id}  gap=${e.gap_ms}ms  samples: ${e.last_sample}→${e.first_sample}  q=${e.queue_depth}`);
+    });
+  } else {
+    r += line('  No click-risk events detected.');
+  }
+  r += line();
+
+  r += hr();
+  r += line('TOP 10 WORST SEND GAPS (ms)');
+  r += hr();
+  s.worst_gaps.forEach((g, i) => {
+    const flag = g > 900 ? ' ← DROPOUT' : g > 700 ? ' ← silence' : '';
+    r += line(`  ${i+1}. ${g} ms${flag}`);
+  });
+  r += line();
+
+  r += hr();
+  r += line('DIAGNOSIS HINTS');
+  r += hr();
+  if (s.silence_padding_kb > 2) {
+    r += line('⚠ HIGH PADDING: flush() is adding lots of silence — check if end_of_tts');
+    r += line('  is firing too early (e.g. per-sentence instead of per-turn).');
+  }
+  if (s.send_gap_max_ms > 900) {
+    r += line('⚠ LARGE GAP: pipeline stalled between chunks — check LLM/TTS latency.');
+    r += line('  Also check if asyncio.sleep pace factor is too aggressive (currently 0.95).');
+  }
+  if (s.click_risks > 3) {
+    r += line('⚠ MULTIPLE CLICKS: LPF alpha or fade window may need tuning, or chunk');
+    r += line('  boundaries are not zero-crossing aligned properly.');
+  }
+  if (s.avg_padding_pct_per_flush === 0 && s.send_gap_max_ms < 700 && s.click_risks === 0) {
+    r += line('✓ No obvious issues detected in this session.');
+  }
+  r += line();
+  r += hr();
+  r += line('RAW EVENT LOG (last 500 events)');
+  r += hr();
+  events.forEach(e => {
+    const t = e.ts ? new Date(e.ts).toISOString().slice(11, 23) : '?';
+    r += line(`[${t}] ${e.type.padEnd(12)} ${JSON.stringify(Object.fromEntries(Object.entries(e).filter(([k])=>k!=='type'&&k!=='ts')))}`);
+  });
+
+  return r;
+}
+
+// ── Boot ───────────────────────────────────────────────────────────────────
+connect();
+drawChart();
+</script>
+</body>
+</html>

@@ -1181,7 +1181,15 @@ class VoiceBookingManager:
 
             # Check slot availability before asking confirmation
             slot_check = await self._check_slot(s)
-            if slot_check.get("available"):
+            # Treat backend errors (connection failure, timeout) the same as "available"
+            # so the user is not blocked and their draft is not wiped on outages.
+            # The reservation attempt will surface the error with its own handling.
+            if slot_check.get("available") or slot_check.get("error"):
+                if slot_check.get("error"):
+                    logger.warning(
+                        f"[Slot-check gate] Backend unreachable ({slot_check['error']}) — "
+                        "proceeding to confirmation without slot validation"
+                    )
                 # If the user already confirmed in this same utterance (e.g. they
                 # corrected a field during confirmation → confirm=False cleared
                 # awaiting_confirmation → then said "yes" on the very next turn),
@@ -1233,9 +1241,12 @@ class VoiceBookingManager:
                 )
                 return {"context": ctx, "end_call": False, "action": None}
             else:
-                # Slot not available — inject alternatives
+                # Slot is genuinely full — offer alternatives and ask user to pick a new time.
+                # Only wipe draft time on slot_full; connection errors are handled above.
                 ctx = build_booking_context(s.draft, [], booking_result=slot_check, clinic_departments=clinic_depts, lang=lang)
-                s.draft["time"] = None  # Clear time so user can pick new one
+                if slot_check.get("slot_full"):
+                    s.draft["time"] = None  # Clear so user can pick from alternatives
+                    logger.info(f"[Slot-check gate] Slot full — cleared draft time, alternatives: {slot_check.get('available_times')}")
                 # ✅ Return booking_result so session.py can inject immediate follow-up
                 return {"context": ctx, "end_call": False, "action": None, "booking_result": slot_check}
 

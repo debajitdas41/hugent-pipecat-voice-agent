@@ -245,7 +245,7 @@ Now output:
         "model": _model(),
         "messages": messages,
         "temperature": 0.3,
-        "max_tokens": 200,         # voice: 1-2 sentences; caps budget for lower TTFT
+        "max_tokens": 70,           # voice: enforces 25-word / 1-sentence limit; ~50 tokens typical for full sentence
         "stream": True,
         "reasoning_effort": None,  # JSON null → disable think mode on sarvam-30b
     }

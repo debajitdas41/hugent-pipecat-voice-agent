@@ -937,97 +937,31 @@ class BookingProcessor(FrameProcessor):
 
         if time_just_selected:
             templates: dict[str, str] = {
-                "en": (
-                    f"{time} is available! Just to confirm — {name}, age {age}, "
-                    f"{dept} department, on {date} at {time}. Shall I go ahead and book this?"
-                ),
-                "hi": (
-                    f"{time} available है! एक बार confirm करते हैं — {name}, उम्र {age}, "
-                    f"{dept} department, {date} को {time} बजे। क्या book करूँ?"
-                ),
-                "bn": (
-                    f"{time} available! একবার confirm করি — {name}, বয়স {age}, "
-                    f"{dept} department, {date} তে {time}। বুক করব?"
-                ),
-                "ta": (
-                    f"{time} available! Confirm பண்ணலாமா — {name}, வயது {age}, "
-                    f"{dept} department, {date} அன்று {time}க்கு. Book பண்ணட்டுமா?"
-                ),
-                "te": (
-                    f"{time} available! Confirm చేద్దామా — {name}, వయసు {age}, "
-                    f"{dept} department, {date} న {time} కి. Book చేయనా?"
-                ),
-                "kn": (
-                    f"{time} available! Confirm ಮಾಡೋಣ — {name}, ವಯಸ್ಸು {age}, "
-                    f"{dept} department, {date} ರಂದು {time} ಕ್ಕೆ. Book ಮಾಡಲಾ?"
-                ),
-                "ml": (
-                    f"{time} available! Confirm ചെയ്യട്ടെ — {name}, പ്രായം {age}, "
-                    f"{dept} department, {date} ന്‍ {time} ന്. Book ചെയ്യട്ടെ?"
-                ),
-                "mr": (
-                    f"{time} available आहे! Confirm करूया — {name}, वय {age}, "
-                    f"{dept} department, {date} ला {time} वाजता. Book करू का?"
-                ),
-                "gu": (
-                    f"{time} available છે! Confirm કરીએ — {name}, ઉંમર {age}, "
-                    f"{dept} department, {date} ના {time} વાગ્યે. Book કરું?"
-                ),
-                "pa": (
-                    f"{time} available ਹੈ! Confirm ਕਰੀਏ — {name}, ਉਮਰ {age}, "
-                    f"{dept} department, {date} ਨੂੰ {time} ਵਜੇ. Book ਕਰਾਂ?"
-                ),
-                "od": (
-                    f"{time} available! Confirm କରୁ — {name}, ବୟସ {age}, "
-                    f"{dept} department, {date} ରେ {time}ରେ. Book କରିବି?"
-                ),
+                "en": f"{time} on {date} is available. Book for {name}?",
+                "hi": f"{date} को {time} available है। {name} के लिए book करूँ?",
+                "bn": f"{date} তে {time} available। {name} এর জন্য বুক করব?",
+                "ta": f"{date} அன்று {time} available. {name} க்கு book பண்ணட்டுமா?",
+                "te": f"{date} న {time} available. {name} కి book చేయనా?",
+                "kn": f"{date} ರಂದು {time} available. {name} ಗೆ book ಮಾಡಲಾ?",
+                "ml": f"{date} ന്‍ {time} available. {name} ന് book ചെയ്യട്ടെ?",
+                "mr": f"{date} ला {time} available आहे. {name} साठी book करू का?",
+                "gu": f"{date} ના {time} available છે. {name} માટે book કરું?",
+                "pa": f"{date} ਨੂੰ {time} available ਹੈ. {name} ਲਈ book ਕਰਾਂ?",
+                "od": f"{date} ରେ {time} available। {name} ପାଇଁ book କରିବି?",
             }
         else:
             templates = {
-                "en": (
-                    f"Just to confirm — {name}, age {age}, {dept} department, "
-                    f"on {date} at {time}. Shall I go ahead and book this?"
-                ),
-                "hi": (
-                    f"एक बार confirm करते हैं — {name}, उम्र {age}, {dept} department, "
-                    f"{date} को {time} बजे। क्या book करूँ?"
-                ),
-                "bn": (
-                    f"একবার confirm করি — {name}, বয়স {age}, {dept} department, "
-                    f"{date} তে {time}। বুক করব?"
-                ),
-                "ta": (
-                    f"Confirm பண்ணலாமா — {name}, வயது {age}, {dept} department, "
-                    f"{date} அன்று {time}க்கு. Book பண்ணட்டுமா?"
-                ),
-                "te": (
-                    f"Confirm చేద్దామా — {name}, వయసు {age}, {dept} department, "
-                    f"{date} న {time} కి. Book చేయనా?"
-                ),
-                "kn": (
-                    f"Confirm ಮಾಡೋಣ — {name}, ವಯಸ್ಸು {age}, {dept} department, "
-                    f"{date} ರಂದು {time} ಕ್ಕೆ. Book ಮಾಡಲಾ?"
-                ),
-                "ml": (
-                    f"Confirm ചെയ്യട്ടെ — {name}, പ്രായം {age}, {dept} department, "
-                    f"{date} ന്‍ {time} ന്. Book ചെയ്യട്ടെ?"
-                ),
-                "mr": (
-                    f"Confirm करूया — {name}, वय {age}, {dept} department, "
-                    f"{date} ला {time} वाजता. Book करू का?"
-                ),
-                "gu": (
-                    f"Confirm કરીએ — {name}, ઉંમર {age}, {dept} department, "
-                    f"{date} ના {time} વાગ્યે. Book કરું?"
-                ),
-                "pa": (
-                    f"Confirm ਕਰੀਏ — {name}, ਉਮਰ {age}, {dept} department, "
-                    f"{date} ਨੂੰ {time} ਵਜੇ. Book ਕਰਾਂ?"
-                ),
-                "od": (
-                    f"Confirm କରୁ — {name}, ବୟସ {age}, {dept} department, "
-                    f"{date} ରେ {time}ରେ. Book କରିବି?"
-                ),
+                "en": f"{dept} on {date} at {time} — book for {name}?",
+                "hi": f"{dept}, {date} को {time} — {name} के लिए book करूँ?",
+                "bn": f"{dept}, {date} তে {time} — {name} এর জন্য বুক করব?",
+                "ta": f"{dept}, {date} அன்று {time} — {name} க்கு book பண்ணட்டுமா?",
+                "te": f"{dept}, {date} న {time} — {name} కి book చేయనా?",
+                "kn": f"{dept}, {date} ರಂದು {time} — {name} ಗೆ book ಮಾಡಲಾ?",
+                "ml": f"{dept}, {date} ന്‍ {time} — {name} ന് book ചെയ്യട്ടെ?",
+                "mr": f"{dept}, {date} ला {time} — {name} साठी book करू का?",
+                "gu": f"{dept}, {date} ના {time} — {name} માટે book કરું?",
+                "pa": f"{dept}, {date} ਨੂੰ {time} — {name} ਲਈ book ਕਰਾਂ?",
+                "od": f"{dept}, {date} ରେ {time} — {name} ପାଇଁ book କରିବି?",
             }
         return templates.get(lang, templates["en"])
 

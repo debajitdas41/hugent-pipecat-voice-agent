@@ -44,6 +44,51 @@ from pipeline_worker import PipecatWorker
 # Store active pipeline workers (replaces sessions dict from v2)
 workers: dict[str, PipecatWorker] = {}
 
+# ── Diagnostic broadcaster ─────────────────────────────────────────────────
+import time as _time
+
+_diag_clients: set[WebSocket] = set()
+
+async def _emit_diag(event: dict) -> None:
+    """Broadcast a diagnostic event to all connected /ws-diag clients (fire-and-forget)."""
+    if not _diag_clients:
+        return
+    payload = json.dumps(event)
+    dead: set[WebSocket] = set()
+    for ws in _diag_clients:
+        try:
+            await ws.send_text(payload)
+        except Exception:
+            dead.add(ws)
+    _diag_clients.difference_update(dead)
+
+@app.get("/diag")
+async def diag_page():
+    p = Path(__file__).parent / "static" / "diag.html"
+    if p.exists():
+        return FileResponse(p)
+    return HTMLResponse("<h2>diag.html not found in static/</h2>", status_code=404)
+
+@app.websocket("/ws-diag")
+async def ws_diag_endpoint(websocket: WebSocket):
+    await websocket.accept()
+    _diag_clients.add(websocket)
+    logger.info(f"Diag client connected — total: {len(_diag_clients)}")
+    # Send welcome so the browser knows the socket is live
+    try:
+        await websocket.send_text(json.dumps({"type": "connected", "ts": round(_time.time() * 1000)}))
+    except Exception:
+        pass
+    try:
+        while True:
+            # keep-alive: browser sends "ping", we reply "pong"
+            msg = await websocket.receive_text()
+            if msg == "ping":
+                await websocket.send_text(json.dumps({"type": "pong", "ts": round(_time.time() * 1000)}))
+    except (WebSocketDisconnect, Exception):
+        _diag_clients.discard(websocket)
+        logger.info(f"Diag client disconnected — remaining: {len(_diag_clients)}")
+
 
 class FreJunAudioBuffer:
     """
@@ -109,9 +154,16 @@ class FreJunAudioBuffer:
             cut = cut & ~1
             chunk = bytes(self.buffer[:cut])
             del self.buffer[:cut]
-            # ── Fix 2: fade only at TTS segment start (not every pacing chunk) ──
-            # Fade-in on first chunk after a flush (= new TTS segment start).
-            # No fade-out on mid-segment chunks — avoids pulsing every 600ms.
+            # ── Fix 2: fading strategy ─────────────────────────────────────
+            # Mid-segment pacing chunks: NO fading.
+            #   The zero-crossing cut places the boundary near amplitude=0
+            #   naturally. Adding fade-out forces last_sample→0 but the next
+            #   chunk's first_sample is still mid-wave → artificial 0→large
+            #   cliff = click. Adding fade-in every 600ms creates a 10ms
+            #   amplitude notch at 1.67 Hz = audible pumping stutter.
+            # First chunk of a TTS segment: fade-IN only.
+            #   Audio starts from silence → need to ramp up from 0.
+            # Last chunk of a turn: fade-OUT only (applied in flush()).
             if self._first_chunk_after_flush:
                 chunk = self._apply_fade(chunk, fade_in=True, fade_out=False)
                 self._first_chunk_after_flush = False
@@ -178,34 +230,44 @@ class FreJunAudioBuffer:
 
     def _nearest_zero_crossing(self, target: int) -> int:
         """
-        Find the nearest zero-crossing to `target` within a ±256-byte window.
-        Returns a sample-aligned index. Falls back to `target` if none found.
+        Find the cut position within ±300 bytes of `target` that minimises
+        |last_sample| + |first_sample| — i.e. both boundary samples are as
+        close to zero amplitude as possible.
+
+        Window ±300 bytes (150 candidate positions at 8kHz PCM16) is wide
+        enough to find near-zero amplitude for speech (which crosses zero many
+        times per millisecond) while keeping chunks in the 9300–9900 byte
+        range (581–619ms) — uniform enough that FreJun's pacing is smooth.
+        Previous ±1500 window sometimes cut at 8100 bytes (506ms) causing
+        irregular chunk timing and slight audio choppiness.
         """
         buf = self.buffer
-        lo = max(2, target - 256) & ~1
-        hi = min(len(buf) - 2, target + 256) & ~1
+        lo = max(2, target - 300) & ~1
+        hi = min(len(buf) - 2, target + 300) & ~1
 
         best_pos = target & ~1
-        best_dist = abs(best_pos - target)
+        best_score = float('inf')
 
         i = lo
-        while i < hi:
-            s0 = (buf[i + 1] << 8 | buf[i]) - (65536 if buf[i + 1] & 0x80 else 0)
-            s1 = (buf[i + 3] << 8 | buf[i + 2]) - (65536 if buf[i + 3] & 0x80 else 0)
-            if (s0 >= 0) != (s1 >= 0):
-                dist = abs(i + 2 - target)
-                if dist < best_dist:
-                    best_dist = dist
-                    best_pos = i + 2
+        while i <= hi:
+            # sample just BEFORE the cut → becomes last_sample of chunk N
+            s_before = (buf[i - 1] << 8 | buf[i - 2]) - (65536 if buf[i - 1] & 0x80 else 0)
+            # sample just AFTER the cut → becomes first_sample of chunk N+1
+            s_after  = (buf[i + 1] << 8 | buf[i    ]) - (65536 if buf[i + 1] & 0x80 else 0)
+            score = abs(s_before) + abs(s_after)
+            if score < best_score:
+                best_score = score
+                best_pos = i
             i += 2
 
         return best_pos
 
     def flush(self) -> bytes:
-        """Return remaining buffered bytes padded to target_bytes (end of TTS segment).
+        """Return remaining real audio bytes at end of TTS segment — no silence padding.
 
-        FreJun drops or mangles chunks shorter than the negotiated chunk_size.
-        Padding with silence ensures the last words always play fully.
+        Diagnostic data showed avg 78% silence padding (467ms/turn × 6 turns = 2.8s
+        injected dead air per call). FreJun plays whatever length arrives as the final
+        chunk of a turn, so padding is unnecessary and harmful.
         """
         if self.buffer:
             # Ensure even length (Fix 1)
@@ -216,17 +278,10 @@ class FreJunAudioBuffer:
                 logger.debug("[buf] flush: buffer empty after alignment, nothing to flush")
                 return b""
             tail = bytes(self.buffer)
-            # Pad with silence (zeros) to target_bytes so FreJun plays the full chunk
-            if len(tail) < self.target_bytes:
-                padding = self.target_bytes - len(tail)
-                tail = tail + bytes(padding)
-                logger.debug(
-                    f"[buf] flush: padded {len(tail) - padding}B audio + {padding}B silence"
-                )
+            real_ms = round(len(tail) / (self.sample_rate * self.bytes_per_sample) * 1000)
             result = self._apply_fade(tail, fade_in=False, fade_out=True)
-            remaining_ms = len(result) / self.target_bytes * self.target_ms
             logger.info(
-                f"[buf] flush: {len(result)}B (~{remaining_ms:.0f}ms) — TTS segment end"
+                f"[buf] flush: {len(result)}B (~{real_ms}ms real audio, no padding) — TTS segment end"
             )
             self.buffer.clear()
             # Next TTS segment starts fresh → fade-in its first chunk
@@ -393,6 +448,24 @@ async def websocket_endpoint(websocket: WebSocket):
                     # so {"type": "clear"} on barge-in stops audio within ≤600ms.
                     audio_send_queue: asyncio.Queue = asyncio.Queue()
 
+                    # ── Diagnostic state (per-session) ────────────────────────────────
+                    _diag_state = {
+                        "t_last_tts": 0.0,       # wall time of last TTS chunk arrival
+                        "t_last_send": 0.0,       # wall time of last FreJun send
+                        "cum_tts_bytes": 0,
+                        "cum_send_bytes": 0,
+                        "cum_padding_bytes": 0,
+                        "last_sample": 0,
+                        "send_chunk_count": 0,
+                        "tts_chunk_count": 0,
+                        "flush_count": 0,
+                        "barge_in_count": 0,
+                        "session_id": session_id,
+                    }
+                    # Lock serialises concurrent send_audio() calls from multiple
+                    # TTS coroutines — prevents negative gap_ms from race on t_last_tts.
+                    _tts_diag_lock = asyncio.Lock()
+
                     async def audio_sender_loop():
                         nonlocal message_id
                         try:
@@ -400,6 +473,13 @@ async def websocket_endpoint(websocket: WebSocket):
                                 chunk = await audio_send_queue.get()
                                 if chunk is None:
                                     break
+                                t_send = _time.time()
+                                gap_ms = round((t_send - _diag_state["t_last_send"]) * 1000) if _diag_state["t_last_send"] else 0
+                                _diag_state["t_last_send"] = t_send
+                                _diag_state["send_chunk_count"] += 1
+                                _diag_state["cum_send_bytes"] += len(chunk)
+                                chunk_ms = round(len(chunk) / (TELECOM_SAMPLE_RATE * 2) * 1000)
+
                                 if websocket.client_state.name == "CONNECTED":
                                     try:
                                         audio_msg = {
@@ -415,6 +495,33 @@ async def websocket_endpoint(websocket: WebSocket):
                                         )
                                     except Exception as e:
                                         logger.error(f"Audio send error: {e}")
+
+                                # Detect click risk at send boundary (last sample of this chunk vs next)
+                                first_s = last_s = 0
+                                click_risk = False
+                                if len(chunk) >= 4:
+                                    r0 = chunk[0] | (chunk[1] << 8)
+                                    first_s = r0 - 65536 if r0 >= 32768 else r0
+                                    rN = chunk[-2] | (chunk[-1] << 8)
+                                    last_s = rN - 65536 if rN >= 32768 else rN
+                                    click_risk = abs(first_s - _diag_state["last_sample"]) > 3000
+                                    _diag_state["last_sample"] = last_s
+
+                                await _emit_diag({
+                                    "type": "buf_send",
+                                    "ts": round(t_send * 1000),
+                                    "session": session_id,
+                                    "chunk_id": message_id - 1,
+                                    "size_b": len(chunk),
+                                    "chunk_ms": chunk_ms,
+                                    "gap_ms": gap_ms,
+                                    "cum_send_kb": round(_diag_state["cum_send_bytes"] / 1024, 1),
+                                    "queue_depth": audio_send_queue.qsize(),
+                                    "first_sample": first_s,
+                                    "last_sample": last_s,
+                                    "click_risk": click_risk,
+                                })
+
                                 # Sleep 95% of chunk playback duration — next chunk
                                 # arrives at FreJun ~5% before it needs it (no gaps,
                                 # half the inter-chunk silence of the old 90% factor).
@@ -427,19 +534,55 @@ async def websocket_endpoint(websocket: WebSocket):
 
                     async def send_audio(pcm_bytes: bytes = b"", end_of_tts: bool = False):
                         try:
-                            ready_chunks = frejun_buffer.add_chunk(pcm_bytes)
-                            for chunk in ready_chunks:
-                                await audio_send_queue.put(chunk)
-                            if end_of_tts:
-                                remaining = frejun_buffer.flush()
-                                if remaining:
-                                    await audio_send_queue.put(remaining)
-                                    logger.info(
-                                        f"[queue] end_of_tts tail queued: {len(remaining)}B "
-                                        f"| queue depth: {audio_send_queue.qsize()}"
-                                    )
-                                else:
-                                    logger.debug("[queue] end_of_tts: no tail to flush")
+                            async with _tts_diag_lock:
+                                t_arrive = _time.time()
+                                if pcm_bytes:
+                                    gap_ms = round((t_arrive - _diag_state["t_last_tts"]) * 1000) if _diag_state["t_last_tts"] else 0
+                                    _diag_state["t_last_tts"] = t_arrive
+                                    _diag_state["tts_chunk_count"] += 1
+                                    _diag_state["cum_tts_bytes"] += len(pcm_bytes)
+                                    await _emit_diag({
+                                        "type": "tts_chunk",
+                                        "ts": round(t_arrive * 1000),
+                                        "session": session_id,
+                                        "n": _diag_state["tts_chunk_count"],
+                                        "size_b": len(pcm_bytes),
+                                        "gap_ms": gap_ms,
+                                        "cum_tts_kb": round(_diag_state["cum_tts_bytes"] / 1024, 1),
+                                        "buf_bytes": len(frejun_buffer.buffer),
+                                        "queue_depth": audio_send_queue.qsize(),
+                                    })
+
+                                ready_chunks = frejun_buffer.add_chunk(pcm_bytes)
+                                for chunk in ready_chunks:
+                                    await audio_send_queue.put(chunk)
+
+                                if end_of_tts:
+                                    pre_flush = len(frejun_buffer.buffer)
+                                    remaining = frejun_buffer.flush()
+                                    padding_b = max(0, len(remaining) - pre_flush) if remaining else 0
+                                    _diag_state["flush_count"] += 1
+                                    _diag_state["cum_padding_bytes"] += padding_b
+                                    if remaining:
+                                        await audio_send_queue.put(remaining)
+                                        logger.info(
+                                            f"[queue] end_of_tts tail queued: {len(remaining)}B "
+                                            f"| queue depth: {audio_send_queue.qsize()}"
+                                        )
+                                        await _emit_diag({
+                                            "type": "buf_flush",
+                                            "ts": round(_time.time() * 1000),
+                                            "session": session_id,
+                                            "flush_n": _diag_state["flush_count"],
+                                            "audio_b": pre_flush,
+                                            "total_b": len(remaining),
+                                            "padding_b": padding_b,
+                                            "pad_pct": round(padding_b / len(remaining) * 100) if remaining else 0,
+                                            "cum_padding_kb": round(_diag_state["cum_padding_bytes"] / 1024, 1),
+                                            "queue_depth": audio_send_queue.qsize(),
+                                        })
+                                    else:
+                                        logger.debug("[queue] end_of_tts: no tail to flush")
                         except Exception as e:
                             logger.error(f"Error queuing audio: {e}")
 
@@ -452,6 +595,7 @@ async def websocket_endpoint(websocket: WebSocket):
                         Result: FreJun finishes the currently playing chunk (≤600ms)
                         then goes silent immediately.
                         """
+                        discarded_b = len(frejun_buffer.buffer)
                         frejun_buffer.clear()
                         drained = 0
                         while not audio_send_queue.empty():
@@ -460,6 +604,15 @@ async def websocket_endpoint(websocket: WebSocket):
                                 drained += 1
                             except asyncio.QueueEmpty:
                                 break
+                        _diag_state["barge_in_count"] += 1
+                        await _emit_diag({
+                            "type": "barge_in",
+                            "ts": round(_time.time() * 1000),
+                            "session": session_id,
+                            "n": _diag_state["barge_in_count"],
+                            "discarded_buf_b": discarded_b,
+                            "drained_queue_chunks": drained,
+                        })
                         try:
                             if websocket.client_state.name == "CONNECTED":
                                 await websocket.send_text(json.dumps({"type": "clear"}))

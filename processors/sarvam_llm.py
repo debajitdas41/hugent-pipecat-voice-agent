@@ -100,30 +100,36 @@ class SarvamLLMProcessor(FrameProcessor):
         t_first_token: Optional[float] = None
         response_parts: list[str] = []
 
-        # Stateful bracket filter + sentence accumulator.
+        # Stateful filter + sentence accumulator.
         #
-        # Problem: pushing one TextFrame per token causes Pipecat's TTS sentence
-        # assembler to re-scan the entire accumulated buffer on every new frame and
-        # re-fire run_tts() for already-seen sentences (observed: 60+ repeats of the
-        # same sentence per turn).
-        #
-        # Fix: accumulate tokens here and only push a TextFrame when a complete
-        # sentence boundary is detected (. ? ! । \n). The TTS receives full sentences,
-        # never partial tokens, so each sentence is synthesised exactly once.
+        # Filters applied (in order):
+        #   1. [square bracket] blocks — internal system signals, never spoken
+        #   2. <think>...</think> blocks — model chain-of-thought, never spoken
+        #   3. Sentence deduplication — model sometimes repeats the same sentence
+        #      5–10 times at end of turn; only the first occurrence is spoken
         _in_bracket: bool = False
         _bracket_buf: str = ""
+        _in_think: bool = False      # inside <think>...</think>
+        _think_buf: str = ""         # accumulates tag chars for detection
         _sentence_buf: str = ""
+        _seen_sentences: set[str] = set()  # dedup: normalised sentence → already spoken
         _SENTENCE_END = set(".?!\n\u0964\u0965")  # includes Devanagari danda
 
         async def _flush_sentence(text: str) -> None:
-            """Push a complete sentence as a single TextFrame.
+            """Push a complete sentence as a single TextFrame (deduplicated).
             Trailing space ensures Pipecat's TTS buffer inserts a word gap
             between consecutive sentences instead of jamming them together.
             """
             text = text.strip()
-            if text:
-                logger.debug(f"[LLM] sentence → TTS: '{text[:80]}'")
-                await self.push_frame(TextFrame(text + " "))
+            if not text:
+                return
+            key = text.lower()
+            if key in _seen_sentences:
+                logger.debug(f"[LLM] duplicate sentence suppressed: '{text[:80]}'")
+                return
+            _seen_sentences.add(key)
+            logger.debug(f"[LLM] sentence → TTS: '{text[:80]}'")
+            await self.push_frame(TextFrame(text + " "))
 
         try:
             async for chunk in llm_module.generate_response_streaming(
@@ -135,8 +141,9 @@ class SarvamLLMProcessor(FrameProcessor):
                 if not (isinstance(chunk, str) and chunk):
                     continue
 
-                # Walk character-by-character: bracket filter + sentence split
+                # Walk character-by-character: bracket filter + think-tag filter + sentence split
                 for ch in chunk:
+                    # ── Filter 1: [square bracket] blocks ──────────────────
                     if _in_bracket:
                         if ch == "]":
                             if _bracket_buf.strip():
@@ -152,8 +159,33 @@ class SarvamLLMProcessor(FrameProcessor):
                         _bracket_buf = ""
                         continue
 
-                    _sentence_buf += ch
+                    # ── Filter 2: <think>...</think> blocks ─────────────────
+                    # Accumulate into _think_buf to detect opening/closing tags
+                    if _in_think:
+                        _think_buf += ch
+                        if _think_buf.endswith("</think>"):
+                            logger.debug(f"[LLM] Filtered <think> block ({len(_think_buf)}ch)")
+                            _think_buf = ""
+                            _in_think = False
+                        # Keep buffer bounded — no <think> block should be huge
+                        if len(_think_buf) > 8000:
+                            logger.warning("[LLM] <think> block exceeded 8000ch — exiting filter")
+                            _think_buf = ""
+                            _in_think = False
+                        continue
 
+                    # Check if a new <think> tag is starting via _think_buf lookahead
+                    _think_buf += ch
+                    if _think_buf == "<think>":
+                        _in_think = True
+                        _think_buf = ""
+                        continue
+                    # If _think_buf can't possibly become "<think>", flush it to sentence_buf
+                    if not "<think>".startswith(_think_buf):
+                        _sentence_buf += _think_buf
+                        _think_buf = ""
+
+                    # ── Sentence boundary ───────────────────────────────────
                     if ch in _SENTENCE_END and _sentence_buf.strip():
                         if t_first_token is None:
                             t_first_token = time.monotonic()
@@ -165,6 +197,9 @@ class SarvamLLMProcessor(FrameProcessor):
             logger.error(f"[LLM] Streaming error: {e}")
 
         # Flush any remaining text (response didn't end with punctuation)
+        # Also flush any partial _think_buf that never became a tag
+        if _think_buf and not _in_think:
+            _sentence_buf += _think_buf
         if _sentence_buf.strip():
             if t_first_token is None:
                 t_first_token = time.monotonic()
